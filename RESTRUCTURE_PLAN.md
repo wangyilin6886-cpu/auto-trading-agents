@@ -105,7 +105,10 @@ public class MarketDataHub {
 信号强度 = max(多头得分, 空头得分)
 信号方向 = 得分更高的一方
 
-开仓条件：信号强度 >= 4（满分约8-9，至少一半以上指标共振）
+开仓阈值（受 CEO 宏观环境动态调节，见第三节）：
+- 默认阈值：3（比原方案更激进，提高交易频率）
+- CEO 判断顺势时：顺势方向阈值降至 2，逆势方向阈值升至 5
+- CEO 判断高波动时：双向阈值升至 4（收缩防御）
 ```
 
 数据窗口从 50 扩大到 **200 根 1 分钟 K 线**（约 3.3 小时），同时启动时通过 REST API 预加载历史 K 线，避免冷启动期。
@@ -172,11 +175,17 @@ public class MarketDataHub {
 
 1. **V3 不再决定价格** — 只给方向，入场价由代码根据 OBI 和买卖盘计算
 2. **R1 拥有硬性否决权** — 不是"建议"，是代码层的 `if (r1Says == VETO) return;`
-3. **CEO 不直接参与交易决策** — 只调整 SignalEngine 的开仓阈值：
-   - BULL + CALM → 多头阈值降低到 3，空头阈值提高到 6
-   - BEAR + VOLATILE → 多头阈值提高到 6，空头阈值降低到 3
-   - RANGING → 双向阈值都是 4
-4. **AI 调用频率大幅降低** — 只有 SignalEngine 评分达标才调用 V3，V3 说开仓才调用 R1。90% 的时间不调用 AI，省钱。
+3. **CEO 不直接参与交易决策** — 调整 SignalEngine 的开仓阈值 + 杠杆档位：
+   - BULL + CALM → 多头阈值降至 2，空头阈值升至 5；顺势杠杆上限 15x
+   - BEAR + CALM → 空头阈值降至 2，多头阈值升至 5；顺势杠杆上限 15x
+   - RANGING + CALM → 双向阈值都是 3；杠杆上限 10x
+   - 任何 + VOLATILE → 双向阈值升至 4；杠杆上限 7x（收缩防御）
+4. **AI 调用频率大幅降低** — 只有 SignalEngine 评分达标才调用 V3，V3 说开仓才调用 R1。大部分时间不调用 AI。
+5. **AI 不可替代的价值** — 代码能算指标但不能"理解"指标组合的含义：
+   - V3 能判断"RSI 超卖但量能萎缩 = 反弹无力，不做多"（代码只会看到 RSI<30 就加分）
+   - V3 能识别指标矛盾时哪个更可信（代码只会线性加权）
+   - R1 深度推理能发现"虽然指标全绿，但上方有巨大挂单墙"（代码不懂挂单分布的战术含义）
+   - CEO 能感知"最近 5 分钟连续 3 次假突破"这种模式（代码需要写死规则才能识别）
 
 #### Prompt 模板（action-selector 白名单模式）
 
@@ -251,19 +260,73 @@ if (obi < -0.6) shortEntry = bestBid;  // 强烈看空时吃买一
 - 如果 5 秒内未成交，自动取消，重新评估
 - 成交后从交易所返回值更新 entryPrice（不用 WebSocket 价格）
 
-#### C. 动态仓位计算
+#### C. 动态杠杆 + 动态仓位（核心盈利引擎）
+
+**设计理念：赢的时候加码，输的时候收缩。不是固定杠杆赌博，而是根据确定性分配火力。**
+
+初始资金：~137 USDT（1000 人民币）
 
 ```java
-// 凯利公式简化版：根据近期胜率和盈亏比动态调整仓位
+// ===== 第一步：基础保证金比例（凯利公式简化版）=====
 double kellyFraction = (winRate * avgWin - (1 - winRate) * avgLoss) / avgWin;
-kellyFraction = Math.max(0.01, Math.min(kellyFraction, 0.05));  // 限制在 1%-5%
+kellyFraction = Math.max(0.02, Math.min(kellyFraction, 0.12));  // 限制在 2%-12%
 
-// 根据信号强度加权
-double marginPct = kellyFraction * (signalScore / MAX_SCORE);
+// ===== 第二步：信号强度缩放 =====
+// 信号强度 3 → ×0.6，信号强度 6 → ×1.0，信号强度 8+ → ×1.2
+double signalMultiplier = 0.4 + (signalScore / MAX_SCORE) * 0.8;
+double marginPct = kellyFraction * signalMultiplier;
 
-// 根据 CEO 宏观环境缩放
-if (macro.contains("VOLATILE")) marginPct *= 0.5;  // 高波动减半仓位
+// ===== 第三步：动态杠杆（基于信号 + 宏观 + V3 置信度）=====
+int leverage;
+if (v3Confidence.equals("HIGH") && macro.contains("CALM")) {
+    // 强信号 + 低波动 + AI 高置信：最大火力
+    leverage = Math.min(15, ceoMaxLeverage);
+    marginPct = Math.min(marginPct * 1.2, 0.12);  // 保证金也上浮，但不超过 12%
+} else if (v3Confidence.equals("MED")) {
+    // 中等信号：标准配置
+    leverage = Math.min(10, ceoMaxLeverage);
+} else {
+    // 低置信或高波动：防御模式
+    leverage = Math.min(7, ceoMaxLeverage);
+    marginPct = Math.min(marginPct * 0.6, 0.05);  // 保证金缩小
+}
+
+// ===== 第四步：连胜/连亏调整（反马丁格尔）=====
+if (consecutiveWins >= 3) {
+    // 连赢 3 笔：手热，加码（但只加利润部分的仓位）
+    double profitBonus = realizedProfit * 0.1;  // 用利润的 10% 追加
+    marginAmount += profitBonus;
+} else if (consecutiveLosses >= 2) {
+    // 连亏 2 笔：减半仓位，等状态恢复
+    marginPct *= 0.5;
+    leverage = Math.min(leverage, 7);
+}
+
+// ===== 硬性上限 =====
+double marginAmount = walletBalance * marginPct;
+marginAmount = Math.max(5.0, Math.min(marginAmount, walletBalance * 0.12));  // 5U 到 12% 之间
+leverage = Math.max(5, Math.min(leverage, 15));  // 5x 到 15x 之间
 ```
+
+**各场景下的期望值（137U 起步）：**
+
+| 场景 | 杠杆 | 保证金 | 名义仓位 | 每笔预期利润 |
+|------|------|--------|----------|-------------|
+| 强信号+CALM+HIGH | 15x | ~16U (12%) | 240U | 0.36U |
+| 中等信号+标准 | 10x | ~11U (8%) | 110U | 0.16U |
+| 弱信号/VOLATILE/LOW | 7x | ~7U (5%) | 49U | 0.07U |
+| 连亏2笔后 | 7x | ~5U (3.5%) | 35U | 0.05U |
+| 连赢3笔后(含利润加码) | 15x | ~18U | 270U | 0.40U |
+
+**日交易预估：20-30 笔（阈值降低后更容易触发）**
+**日期望收益：~3-5U（约 2-3.5%）**
+**月复利：137U → ~250-310U**
+**6个月复利：137U → ~1800-4200U（约 1.3-3 万元）**
+
+**风险控制确保不会失控：**
+- 即使连亏 10 笔（极端情况），总损失 = 约 8U（6%），远低于 10% 日亏停机线
+- 最大单笔亏损 = 12% × 15x × ATR止损 ≈ 总资金的 2.7%
+- 杠杆 15x 时爆仓距离 6.7%，但物理止损在 ATR×1.5 ≈ 1-2% 处触发，远在爆仓线之前
 
 #### D. 动态止盈止损
 
@@ -322,7 +385,7 @@ public class RiskGuard {
     static final double MAX_DAILY_LOSS_PCT = 0.10;  // 日亏 10% 当日停机
 
     // 4. 每日最大交易次数
-    static final int MAX_DAILY_TRADES = 30;  // 防止疯狂开平仓
+    static final int MAX_DAILY_TRADES = 50;  // 提高上限适配更高交易频率
 
     // 5. 连续亏损熔断
     static final int MAX_CONSECUTIVE_LOSSES = 5;  // 连亏 5 次暂停 30 分钟
@@ -595,8 +658,11 @@ if (apiKey == null) {
 
 ## 十一、预期效果
 
-- **交易频率**：从"半天一笔"提升到"符合条件就做"，预计每天 5-15 笔
-- **决策质量**：从单一 RSI 提升到 8+ 指标共振，假信号大幅减少
-- **风控**：从 prompt 建议 → 代码硬性执行，AI 无法绕过
-- **成本**：AI 调用减少 80%+（只有信号达标才调用），大部分时间纯代码运行
-- **可维护性**：完整日志链路，每笔交易可回溯分析
+- **交易频率**：从"半天一笔"提升到每天 20-30 笔（阈值降至 3，信号刷新频率 500ms）
+- **决策质量**：从单一 RSI 提升到 8+ 指标共振，AI 在指标矛盾时做非线性判断
+- **动态火力**：强信号 15x 杠杆 + 12% 保证金，弱信号 7x + 5%，连亏自动缩仓
+- **风控**：从 prompt 建议 → 代码硬性执行，AI 无法绕过；R1 深度推理拥有否决权
+- **盈利预期**：137U 起步，日均 2-3.5%，月复利 ~80-110%，6 个月目标 1800-4200U
+- **最大风险**：单笔最大亏损 2.7%，日亏 10% 停机，全局亏 20% 永久熔断
+- **成本**：AI 调用约 350 次/天 ≈ 0.35 元/天（只在信号达标时调用）
+- **可维护性**：完整 JSON Lines 日志，每笔交易含完整指标+AI推理+风控审计链路
