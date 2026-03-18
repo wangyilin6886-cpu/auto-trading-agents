@@ -1,0 +1,10 @@
+*.properties
+.env
+logs/
+kill_switch.flag
+target/
+*.class
+*.jar
+.idea/
+*.iml
+.DS_Store

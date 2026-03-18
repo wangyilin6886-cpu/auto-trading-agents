@@ -20,21 +20,22 @@ public class Main {
     private static final Object evalLock = new Object();
 
     public static void main(String[] args) {
-        System.out.println("=====================================================");
-        System.out.println("🚀 [实盘点火] 巨鲸收割者 6.0 (5层防爆 + 极限激进版)");
-        System.out.println("=====================================================");
-        System.out.println("  动态杠杆 3-25x | 浮盈加仓 | 爆仓猎杀 | 追踪止盈");
-        System.out.println("  5层风控: 文件KillSwitch + 20%熔断 + 日限10% + 连亏冷却 + 单笔5%");
-        System.out.println("=====================================================\n");
+        // 打印配置摘要
+        Config.printSummary();
 
-        String API_KEY = "gKPgDkGiFRPHYaT7qwH4uYlw404oVC9KVdsdyrpCtzx37zj8y73fMTcQo01Ah5sL";
-        String SECRET_KEY = "i8zlTP9YuCwuzksMRsPxa5hE8PbCczS0owMRrwgq8ddceHmrqZ1qHIOKve7eoVjr";
-        double INITIAL_CAPITAL = 50.0;
+        // 初始化审计日志
+        AuditLogger audit = AuditLogger.init(Config.LOG_DIR);
+        audit.logSystem("System starting in " + Config.TRADING_MODE + " mode");
 
         // 初始化组件
-        RiskManager riskManager = new RiskManager(INITIAL_CAPITAL);
+        RiskManager riskManager = new RiskManager(Config.INITIAL_CAPITAL);
         OpenClawGatewayClient gateway = new OpenClawGatewayClient("openclaw");
-        BinanceRealAccount account = new BinanceRealAccount(API_KEY, SECRET_KEY, INITIAL_CAPITAL);
+
+        // 初始化 Telegram 通知
+        TelegramNotifier telegramNotifier = new TelegramNotifier(gateway);
+        audit.setTelegramNotifier(telegramNotifier);
+
+        BinanceRealAccount account = new BinanceRealAccount(Config.BINANCE_API_KEY, Config.BINANCE_SECRET_KEY, Config.INITIAL_CAPITAL);
         account.setRiskManager(riskManager);
 
         // 初始化决策引擎
@@ -46,7 +47,7 @@ public class Main {
 
         // 启动前检查 Kill Switch
         if (riskManager.isKilled()) {
-            System.out.println("💀 [启动终止] 检测到KillSwitch文件，系统拒绝启动。删除 /tmp/trading_killswitch 后重试。");
+            System.out.println("💀 [启动终止] 检测到KillSwitch文件，系统拒绝启动。删除 " + Config.KILL_SWITCH_FILE + " 后重试。");
             return;
         }
 

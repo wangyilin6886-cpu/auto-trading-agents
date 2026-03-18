@@ -11,7 +11,7 @@ import java.util.Locale;
  */
 public class RiskManager {
 
-    private static final String KILL_SWITCH_FILE = "/tmp/trading_killswitch";
+    private static final String KILL_SWITCH_FILE = Config.KILL_SWITCH_FILE;
 
     private final double initialCapital;
     private volatile boolean memoryKilled = false;
@@ -94,6 +94,9 @@ public class RiskManager {
             if (consecutiveLosses >= MAX_CONSECUTIVE_LOSSES) {
                 cooldownUntil = System.currentTimeMillis() + COOLDOWN_DURATION_MS;
                 System.out.println("🧊 [风控冷却] 连亏" + consecutiveLosses + "笔，强制冷却30分钟");
+                try {
+                    AuditLogger.get().alert("CONSECUTIVE_LOSS", "连亏" + consecutiveLosses + "笔，冷却30分钟");
+                } catch (Exception ignored) {}
                 consecutiveLosses = 0; // 冷却后重新计数
             }
         } else {
@@ -112,6 +115,9 @@ public class RiskManager {
             System.err.println("警告：无法创建KillSwitch文件: " + e.getMessage());
         }
         System.out.println("💀💀💀 [永久熔断] " + reason + " | KillSwitch文件已写入，重启也无法交易 💀💀💀");
+        try {
+            AuditLogger.get().alert("KILL_SWITCH", reason);
+        } catch (Exception ignored) {}
     }
 
     /**

@@ -191,7 +191,7 @@ public class BinanceRealAccount {
             System.out.println("⚠️ [平仓重试] 第" + attempt + "次失败，"
                     + (attempt < CLOSE_RETRY_COUNT ? (CLOSE_RETRY_DELAY_MS + "ms后重试...") : "已达最大重试次数！"));
             if (attempt < CLOSE_RETRY_COUNT) {
-                try { Thread.sleep(CLOSE_RETRY_DELAY_MS); } catch (InterruptedException ignored) {}
+                try { Thread.sleep(CLOSE_RETRY_DELAY_MS); } catch (InterruptedException e) { Thread.currentThread().interrupt(); }
             }
         }
 

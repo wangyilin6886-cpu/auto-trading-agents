@@ -306,7 +306,9 @@ public class TradingDecisionEngine {
             if (m.find()) {
                 return m.group(1).replace("\\n", " ").replace("\\\"", "\"").replace("\\\\", "\\");
             }
-        } catch (Exception e) { /* fall through */ }
+        } catch (Exception e) {
+            System.err.println("[extractTruePayload] Parse error: " + e.getMessage());
+        }
         return raw;
     }
 
@@ -322,7 +324,9 @@ public class TradingDecisionEngine {
         try {
             Matcher m = Pattern.compile("\"trigger_price\"\\s*:\\s*([0-9.]+)").matcher(cleanOut);
             if (m.find()) return Double.parseDouble(m.group(1));
-        } catch (Exception e) { /* fall through */ }
+        } catch (Exception e) {
+            System.err.println("[parseTriggerPrice] Parse error: " + e.getMessage());
+        }
         return 0.0;
     }
 
@@ -330,7 +334,9 @@ public class TradingDecisionEngine {
         try {
             Matcher m = Pattern.compile("\"reason\"\\s*:\\s*\"([^\"]+)\"").matcher(cleanOut);
             if (m.find()) return m.group(1);
-        } catch (Exception e) { /* fall through */ }
+        } catch (Exception e) {
+            System.err.println("[parseReason] Parse error: " + e.getMessage());
+        }
         return "多智能体联合推演";
     }
 
