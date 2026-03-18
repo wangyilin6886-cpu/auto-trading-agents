@@ -11,14 +11,16 @@ public class Main {
 
     public static void main(String[] args) {
         System.out.println("=====================================================");
-        System.out.println("🚀 [实盘点火] 巨鲸收割者 5.0 (HFT 陷阱触发引擎版)");
+        System.out.println("🚀 [模拟盘点火] 巨鲸收割者 5.0 (HFT 陷阱触发引擎版)");
         System.out.println("=====================================================\n");
 
-        String API_KEY = "gKPgDkGiFRPHYaT7qwH4uYlw404oVC9KVdsdyrpCtzx37zj8y73fMTcQo01Ah5sL"; 
-        String SECRET_KEY = "i8zlTP9YuCwuzksMRsPxa5hE8PbCczS0owMRrwgq8ddceHmrqZ1qHIOKve7eoVjr";
-
         OpenClawGatewayClient gateway = new OpenClawGatewayClient("openclaw");
-        BinanceRealAccount account = new BinanceRealAccount(API_KEY, SECRET_KEY, 50.0);
+        // 模拟盘模式：不花真钱，用虚拟账户跑策略验证
+        FuturesVirtualAccount account = new FuturesVirtualAccount(50.0);
+        // 实盘模式（注释掉）：
+        // String API_KEY = "your_api_key";
+        // String SECRET_KEY = "your_secret_key";
+        // BinanceRealAccount account = new BinanceRealAccount(API_KEY, SECRET_KEY, 50.0);
 
         try {
             URI uri = new URI("wss://stream.binance.com:9443/ws/solusdt@kline_1m");

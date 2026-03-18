@@ -32,7 +32,7 @@ public class TradingDecisionEngine {
     // ==========================================
     // ⚡ 极速突击通道 (每 1 毫秒触发)
     // ==========================================
-    public static void checkFastTrap(double currentPrice, BinanceRealAccount account) {
+    public static void checkFastTrap(double currentPrice, TradingAccount account) {
         if (!account.getPositionSide().equals("NONE")) {
             activeTrap = null; 
             return;
@@ -59,7 +59,7 @@ public class TradingDecisionEngine {
     // ==========================================
     // 🧠 大脑运筹通道 (每 15 秒思考一次)
     // ==========================================
-    public static void evaluateAndAskAI(double currentPrice, OpenClawGatewayClient gateway, BinanceRealAccount account) {
+    public static void evaluateAndAskAI(double currentPrice, OpenClawGatewayClient gateway, TradingAccount account) {
         if (account.checkGlobalKillSwitch()) return; 
         if (!IndicatorCalculator.isReady()) return;
         
@@ -154,7 +154,7 @@ public class TradingDecisionEngine {
         }
     }
 
-    private static void executeFire(String side, double currentPrice, BinanceRealAccount account, String reason) {
+    private static void executeFire(String side, double currentPrice, TradingAccount account, String reason) {
         double wallet = account.getWalletBalance();
         double marginToUse = wallet * BASE_MARGIN_PCT;
         if (marginToUse < 10.0) marginToUse = 10.0;

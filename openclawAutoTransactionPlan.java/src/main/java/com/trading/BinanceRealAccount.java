@@ -14,7 +14,7 @@ import javax.crypto.spec.SecretKeySpec;
 
 import org.json.JSONObject;
 
-public class BinanceRealAccount {
+public class BinanceRealAccount implements TradingAccount {
 
     private final String apiKey;
     private final String secretKey;
