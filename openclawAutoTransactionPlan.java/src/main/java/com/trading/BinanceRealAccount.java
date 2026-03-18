@@ -263,7 +263,6 @@ public class BinanceRealAccount {
                          + "&type=STOP_MARKET"
                          + "&stopPrice=" + formattedPrice
                          + "&closePosition=true"
-                         + "&timeInForce=GTC"
                          + "&recvWindow=60000"
                          + "&timestamp=" + System.currentTimeMillis();
 

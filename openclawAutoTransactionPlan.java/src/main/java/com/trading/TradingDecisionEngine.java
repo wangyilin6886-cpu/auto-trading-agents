@@ -20,13 +20,13 @@ public class TradingDecisionEngine {
 
     // ===== 策略参数 =====
     private static final double BASE_MARGIN_PCT = 0.05;   // 基础仓位用5%本金
-    private static final double TAKE_PROFIT_ROE = 80.0;    // 固定止盈线
-    private static final double STOP_LOSS_ROE = -50.0;     // 固定止损线
+    private static final double TAKE_PROFIT_ROE = 8.0;     // 固定止盈线 (10x杠杆下≈0.8%价格变动)
+    private static final double STOP_LOSS_ROE = -5.0;      // 固定止损线 (10x杠杆下≈0.5%价格变动)
     private static final int COOLDOWN_TICKS = 3;
 
     // ===== 追踪止盈 =====
-    private static final double TRAILING_ACTIVATE_ROE = 30.0;  // ROE>30%激活追踪
-    private static final double TRAILING_CALLBACK_PCT = 0.50;  // 回撤50%利润平仓
+    private static final double TRAILING_ACTIVATE_ROE = 5.0;   // ROE>5%激活追踪
+    private static final double TRAILING_CALLBACK_PCT = 0.40;  // 回撤40%利润平仓
     private static volatile double peakROE = 0;
     private static volatile boolean trailingActive = false;
 
@@ -201,16 +201,21 @@ public class TradingDecisionEngine {
         System.out.println("\n📊 现价=" + fmtPrice(currentPrice) + " | RSI=" + fmtPrice(rsi)
                 + " | 宏观=" + macro + " | 风控=" + risk);
 
+        String posSide = account.getPositionSide();
+        double roe = hasPos ? account.getROE(currentPrice) : 0;
+
         String prompt = String.format(Locale.US,
                 "You are an HFT Planner. Output ONLY JSON.\n" +
-                "Inputs: Price=%.4f, RSI=%.2f, Macro='%s', Risk='%s', HasPos=%b.\n" +
-                "Rules:\n" +
-                "1. If HasPos=true, and trend reverses, output {\"decision\":\"CLOSE\", \"reason\":\"...\"}\n" +
-                "2. If HasPos=false, RSI < 45 and Macro != BEAR_TREND, predict a dip to buy. Output {\"decision\":\"TRAP_LONG\", \"trigger_price\": <price lower than current>, \"reason\":\"...\"}\n" +
-                "3. If HasPos=false, RSI > 55 and Macro != BULL_TREND, predict a peak to sell. Output {\"decision\":\"TRAP_SHORT\", \"trigger_price\": <price higher than current>, \"reason\":\"...\"}\n" +
-                "4. Otherwise output {\"decision\":\"HOLD\"}\n" +
+                "Inputs: Price=%.4f, RSI=%.2f, Macro='%s', Risk='%s', HasPos=%b, PosSide='%s', ROE=%.2f%%.\n" +
+                "Rules (check in order, first match wins):\n" +
+                "1. If HasPos=true and PosSide=LONG and (RSI > 65 or ROE > 5 or ROE < -3), output {\"decision\":\"CLOSE\", \"reason\":\"...\"}\n" +
+                "2. If HasPos=true and PosSide=SHORT and (RSI < 35 or ROE > 5 or ROE < -3), output {\"decision\":\"CLOSE\", \"reason\":\"...\"}\n" +
+                "3. If HasPos=true and Risk contains HIGH_MANIPULATION, output {\"decision\":\"CLOSE\", \"reason\":\"risk too high\"}\n" +
+                "4. If HasPos=false, RSI < 40 and Macro != BEAR_TREND, predict a dip. Output {\"decision\":\"TRAP_LONG\", \"trigger_price\": <price slightly below current>, \"reason\":\"...\"}\n" +
+                "5. If HasPos=false, RSI > 60 and Macro != BULL_TREND, predict a peak. Output {\"decision\":\"TRAP_SHORT\", \"trigger_price\": <price slightly above current>, \"reason\":\"...\"}\n" +
+                "6. Otherwise output {\"decision\":\"HOLD\", \"reason\":\"...\"}\n" +
                 "Output JSON exactly.",
-                currentPrice, rsi, macro, risk, hasPos);
+                currentPrice, rsi, macro, risk, hasPos, posSide, roe);
 
         try {
             String raw = safe(gateway.askTraderSync("v3", "trader_exec", prompt));
