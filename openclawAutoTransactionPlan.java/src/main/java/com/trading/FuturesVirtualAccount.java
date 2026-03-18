@@ -2,7 +2,7 @@ package com.trading;
 
 import java.util.Locale;
 
-public class FuturesVirtualAccount {
+public class FuturesVirtualAccount implements TradingAccount {
 
     // ===== 资金中心 (本金与利润严格分离) =====
     private final double initialCapital; // 初始本金 (绝不动用超过风控比例)
@@ -20,10 +20,21 @@ public class FuturesVirtualAccount {
     private static final double TAKER_FEE = 0.0004; // 币安合约市价单手续费 0.04%
     private static final double MAINT_MARGIN_RATE = 0.01; // 维持保证金率 (低于此线爆仓)
 
+    private boolean isGlobalKilled = false;
+
     public FuturesVirtualAccount(double initialCapital) {
         this.initialCapital = initialCapital;
         this.walletBalance = initialCapital;
         this.realizedProfit = 0.0;
+    }
+
+    public boolean checkGlobalKillSwitch() {
+        if (isGlobalKilled) return true;
+        if (walletBalance <= initialCapital * 0.80) {
+            isGlobalKilled = true;
+            System.out.println("💀💀💀 [最高灾难] 触发 20% 全局最大回撤！模拟盘已锁死！ 💀💀💀");
+        }
+        return isGlobalKilled;
     }
 
     // ==========================================

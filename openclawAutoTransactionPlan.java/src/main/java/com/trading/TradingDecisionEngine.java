@@ -10,9 +10,12 @@ public class TradingDecisionEngine {
     private static final double BASE_MARGIN_PCT = 0.05;    
     private static final int BASE_LEVERAGE = 10;           
     private static final int SNOWBALL_LEVERAGE = 20;       
-    private static final double TAKE_PROFIT_ROE = 80.0;    
-    private static final double STOP_LOSS_ROE = -50.0;     
-    private static final int COOLDOWN_TICKS = 3;           
+    private static final double TAKE_PROFIT_ROE = 8.0;     // 硬止盈：+8% ROE
+    private static final double STOP_LOSS_ROE = -5.0;      // 硬止损：-5% ROE
+    private static final int COOLDOWN_TICKS = 3;
+
+    // 🎯 移动止盈：价格到过的最高ROE记录，回撤超过阈值就平仓锁利
+    private static double peakROE = 0.0;           
 
     private static int ticksSinceLastClose = 999;
 
@@ -32,7 +35,7 @@ public class TradingDecisionEngine {
     // ==========================================
     // ⚡ 极速突击通道 (每 1 毫秒触发)
     // ==========================================
-    public static void checkFastTrap(double currentPrice, BinanceRealAccount account) {
+    public static void checkFastTrap(double currentPrice, TradingAccount account) {
         if (!account.getPositionSide().equals("NONE")) {
             activeTrap = null; 
             return;
@@ -59,7 +62,7 @@ public class TradingDecisionEngine {
     // ==========================================
     // 🧠 大脑运筹通道 (每 15 秒思考一次)
     // ==========================================
-    public static void evaluateAndAskAI(double currentPrice, OpenClawGatewayClient gateway, BinanceRealAccount account) {
+    public static void evaluateAndAskAI(double currentPrice, OpenClawGatewayClient gateway, TradingAccount account) {
         if (account.checkGlobalKillSwitch()) return; 
         if (!IndicatorCalculator.isReady()) return;
         
@@ -73,16 +76,30 @@ public class TradingDecisionEngine {
 
         if (!account.getPositionSide().equals("NONE")) {
             double roe = account.getROE(currentPrice);
+
+            // 更新历史最高ROE
+            if (roe > peakROE) peakROE = roe;
+
+            // 1. 硬止损
             if (roe <= STOP_LOSS_ROE) {
-                System.out.println("🚨 [系统最高警报] 触发实盘 -50% ROE，启动断臂求生！");
-                account.closePosition(currentPrice, "物理止损熔断");
-                ticksSinceLastClose = 0; return;
+                System.out.println("🚨 [硬止损] ROE=" + fmtPrice(roe) + "% 触及 " + fmtPrice(STOP_LOSS_ROE) + "% 红线！");
+                account.closePosition(currentPrice, "硬止损 ROE=" + fmtPrice(roe) + "%");
+                peakROE = 0; ticksSinceLastClose = 0; return;
             }
+            // 2. 硬止盈
             if (roe >= TAKE_PROFIT_ROE) {
-                System.out.println("💰 [系统最高指令] 利润达到目标，强制落袋为安！");
-                account.closePosition(currentPrice, "机械止盈");
-                ticksSinceLastClose = 0; return;
+                System.out.println("💰 [硬止盈] ROE=" + fmtPrice(roe) + "% 达标！");
+                account.closePosition(currentPrice, "硬止盈 ROE=" + fmtPrice(roe) + "%");
+                peakROE = 0; ticksSinceLastClose = 0; return;
             }
+            // 3. 移动止盈：曾经赚到 +3% 以上，回撤超过一半就锁利
+            if (peakROE >= 3.0 && roe <= peakROE * 0.5) {
+                System.out.println("🔒 [移动止盈] 峰值ROE=" + fmtPrice(peakROE) + "% → 当前=" + fmtPrice(roe) + "% 回撤过多，锁利！");
+                account.closePosition(currentPrice, "移动止盈: 峰值" + fmtPrice(peakROE) + "%→当前" + fmtPrice(roe) + "%");
+                peakROE = 0; ticksSinceLastClose = 0; return;
+            }
+        } else {
+            peakROE = 0; // 空仓时重置
         }
 
         try {
@@ -103,58 +120,94 @@ public class TradingDecisionEngine {
         String risk = IntelligenceBoard.getCroRisk();
         boolean hasPos = !account.getPositionSide().equals("NONE");
 
-        System.out.println("\n📊 现价=" + fmtPrice(currentPrice) + " | RSI=" + fmtPrice(rsi));
+        double currentROE = hasPos ? account.getROE(currentPrice) : 0.0;
+        double currentPNL = hasPos ? account.getUnrealizedPNL(currentPrice) : 0.0;
+        String posSide = account.getPositionSide();
+
+        System.out.println("\n📊 现价=" + fmtPrice(currentPrice) + " | RSI=" + fmtPrice(rsi) +
+                (hasPos ? " | ROE=" + fmtPrice(currentROE) + "% | PNL=" + fmtPrice(currentPNL) : ""));
+
+        String positionInfo = hasPos
+                ? String.format(Locale.US, ", PosSide='%s', ROE=%.2f%%, PNL=%.4f USDT", posSide, currentROE, currentPNL)
+                : "";
 
         String prompt = String.format(Locale.US,
                 "You are an HFT Planner. Output ONLY JSON.\n" +
-                "Inputs: Price=%.4f, RSI=%.2f, Macro='%s', Risk='%s', HasPos=%b.\n" +
+                "Inputs: Price=%.4f, RSI=%.2f, Macro='%s', Risk='%s', HasPos=%b%s.\n" +
                 "Rules:\n" +
-                "1. If HasPos=true, and trend reverses, output {\"decision\":\"CLOSE\", \"reason\":\"...\"}\n" +
-                "2. If HasPos=false, RSI < 45 and Macro != BEAR_TREND, predict a dip to buy. Output {\"decision\":\"TRAP_LONG\", \"trigger_price\": <price lower than current>, \"reason\":\"...\"}\n" +
-                "3. If HasPos=false, RSI > 55 and Macro != BULL_TREND, predict a peak to sell. Output {\"decision\":\"TRAP_SHORT\", \"trigger_price\": <price higher than current>, \"reason\":\"...\"}\n" +
-                "4. Otherwise output {\"decision\":\"HOLD\"}\n" +
+                "1. If HasPos=true and ROE < -3%%, output {\"decision\":\"CLOSE\", \"reason\":\"stop loss\"}\n" +
+                "2. If HasPos=true and ROE > 5%%, output {\"decision\":\"CLOSE\", \"reason\":\"take profit\"}\n" +
+                "3. If HasPos=true and trend reverses against position, output {\"decision\":\"CLOSE\", \"reason\":\"...\"}\n" +
+                "4. If HasPos=false, RSI < 40 and Macro != BEAR_TREND, output {\"decision\":\"TRAP_LONG\", \"trigger_price\": <price slightly below current>, \"reason\":\"...\"}\n" +
+                "5. If HasPos=false, RSI > 60 and Macro != BULL_TREND, output {\"decision\":\"TRAP_SHORT\", \"trigger_price\": <price slightly above current>, \"reason\":\"...\"}\n" +
+                "6. Otherwise output {\"decision\":\"HOLD\"}\n" +
                 "Output JSON exactly.",
-                currentPrice, rsi, macro, risk, hasPos);
+                currentPrice, rsi, macro, risk, hasPos, positionInfo);
+
+        String decision = "HOLD";
+        String reason = "";
+        double triggerPrice = 0.0;
 
         try {
             String raw = safe(gateway.askTraderSync("v3", "trader_exec", prompt));
-            
-            // 🛑 核心修复：只提取 payload 里面真正的 AI 回复，过滤掉系统规则
             String cleanAIOutput = extractTruePayload(raw);
-            
-            String decision = parseDecision(cleanAIOutput);
-            String reason = parseReason(cleanAIOutput);
-            double triggerPrice = parseTriggerPrice(cleanAIOutput);
 
-            // 🛑 智能补全：如果大模型太笨没输出价格，系统自动补齐！
-            if (triggerPrice <= 0 && decision.startsWith("TRAP_")) {
-                triggerPrice = decision.equals("TRAP_LONG") ? currentPrice - 0.03 : currentPrice + 0.03;
-            }
-
-            System.out.println("🧠 [V3 大脑推演] 决策: " + decision + " | 理由: " + reason);
-
-            if (decision.equals("CLOSE") && hasPos) {
-                account.closePosition(currentPrice, "AI 战术撤退: " + reason);
-                ticksSinceLastClose = 0;
-            } 
-            else if (decision.startsWith("TRAP_") && !hasPos) {
-                if (ticksSinceLastClose < COOLDOWN_TICKS) {
-                    System.out.println("⏳ 枪管过热，冷却中...");
-                } else if (triggerPrice > 0) {
-                    String side = decision.replace("TRAP_", ""); 
-                    triggerPrice = Math.round(triggerPrice * 1000.0) / 1000.0; // 格式化为3位小数
-                    activeTrap = new TacticalTrap(side, triggerPrice, System.currentTimeMillis() + 60000, reason);
-                    System.out.println("🕸️ [潜伏模式] 狙击手已在 " + triggerPrice + " 布置 " + side + " 陷阱！等待猎物踩雷...");
-                }
-            } else {
-                account.printStatus(currentPrice);
-            }
+            decision = parseDecision(cleanAIOutput);
+            reason = parseReason(cleanAIOutput);
+            triggerPrice = parseTriggerPrice(cleanAIOutput);
         } catch (Exception e) {
-            System.out.println("❌ [大脑通讯断裂] 继续依靠底层程序防护: " + e.getMessage());
+            System.out.println("⚠️ [AI 通讯异常] " + e.getMessage());
+        }
+
+        // 🛑 核心防线：AI 解析失败时(理由为默认值)，启用程序化规则兜底
+        boolean aiFailed = reason.equals("多智能体联合推演");
+        if (aiFailed && hasPos) {
+            if (currentROE <= -3.0) {
+                decision = "CLOSE";
+                reason = "程序兜底: 亏损 " + fmtPrice(currentROE) + "% 止损";
+            } else if (currentROE >= 5.0) {
+                decision = "CLOSE";
+                reason = "程序兜底: 盈利 +" + fmtPrice(currentROE) + "% 止盈";
+            }
+        }
+        if (aiFailed && !hasPos && ticksSinceLastClose >= COOLDOWN_TICKS) {
+            if (rsi < 30) {
+                decision = "TRAP_LONG";
+                triggerPrice = currentPrice - 0.02;
+                reason = "程序兜底: RSI=" + fmtPrice(rsi) + " 超卖，尝试抄底";
+            } else if (rsi > 70) {
+                decision = "TRAP_SHORT";
+                triggerPrice = currentPrice + 0.02;
+                reason = "程序兜底: RSI=" + fmtPrice(rsi) + " 超买，尝试做空";
+            }
+        }
+
+        // 智能补全触发价格
+        if (triggerPrice <= 0 && decision.startsWith("TRAP_")) {
+            triggerPrice = decision.equals("TRAP_LONG") ? currentPrice - 0.03 : currentPrice + 0.03;
+        }
+
+        System.out.println("🧠 [V3 决策] " + decision + " | " + reason + (aiFailed ? " (AI离线,程序兜底)" : ""));
+
+        if (decision.equals("CLOSE") && hasPos) {
+            account.closePosition(currentPrice, reason);
+            ticksSinceLastClose = 0;
+        }
+        else if (decision.startsWith("TRAP_") && !hasPos) {
+            if (ticksSinceLastClose < COOLDOWN_TICKS) {
+                System.out.println("⏳ 枪管过热，冷却中...");
+            } else if (triggerPrice > 0) {
+                String side = decision.replace("TRAP_", "");
+                triggerPrice = Math.round(triggerPrice * 1000.0) / 1000.0;
+                activeTrap = new TacticalTrap(side, triggerPrice, System.currentTimeMillis() + 60000, reason);
+                System.out.println("🕸️ [潜伏模式] 狙击手已在 " + triggerPrice + " 布置 " + side + " 陷阱！");
+            }
+        } else {
+            account.printStatus(currentPrice);
         }
     }
 
-    private static void executeFire(String side, double currentPrice, BinanceRealAccount account, String reason) {
+    private static void executeFire(String side, double currentPrice, TradingAccount account, String reason) {
         double wallet = account.getWalletBalance();
         double marginToUse = wallet * BASE_MARGIN_PCT;
         if (marginToUse < 10.0) marginToUse = 10.0;
