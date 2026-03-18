@@ -10,9 +10,12 @@ public class TradingDecisionEngine {
     private static final double BASE_MARGIN_PCT = 0.05;    
     private static final int BASE_LEVERAGE = 10;           
     private static final int SNOWBALL_LEVERAGE = 20;       
-    private static final double TAKE_PROFIT_ROE = 30.0;
-    private static final double STOP_LOSS_ROE = -15.0;
-    private static final int COOLDOWN_TICKS = 3;           
+    private static final double TAKE_PROFIT_ROE = 8.0;     // 硬止盈：+8% ROE
+    private static final double STOP_LOSS_ROE = -5.0;      // 硬止损：-5% ROE
+    private static final int COOLDOWN_TICKS = 3;
+
+    // 🎯 移动止盈：价格到过的最高ROE记录，回撤超过阈值就平仓锁利
+    private static double peakROE = 0.0;           
 
     private static int ticksSinceLastClose = 999;
 
@@ -73,16 +76,30 @@ public class TradingDecisionEngine {
 
         if (!account.getPositionSide().equals("NONE")) {
             double roe = account.getROE(currentPrice);
+
+            // 更新历史最高ROE
+            if (roe > peakROE) peakROE = roe;
+
+            // 1. 硬止损
             if (roe <= STOP_LOSS_ROE) {
-                System.out.println("🚨 [程序化止损] ROE=" + fmtPrice(roe) + "% 触及 " + fmtPrice(STOP_LOSS_ROE) + "% 红线，立即斩仓！");
-                account.closePosition(currentPrice, "程序化止损 ROE=" + fmtPrice(roe) + "%");
-                ticksSinceLastClose = 0; return;
+                System.out.println("🚨 [硬止损] ROE=" + fmtPrice(roe) + "% 触及 " + fmtPrice(STOP_LOSS_ROE) + "% 红线！");
+                account.closePosition(currentPrice, "硬止损 ROE=" + fmtPrice(roe) + "%");
+                peakROE = 0; ticksSinceLastClose = 0; return;
             }
+            // 2. 硬止盈
             if (roe >= TAKE_PROFIT_ROE) {
-                System.out.println("💰 [程序化止盈] ROE=" + fmtPrice(roe) + "% 达到 +" + fmtPrice(TAKE_PROFIT_ROE) + "% 目标，落袋为安！");
-                account.closePosition(currentPrice, "程序化止盈 ROE=" + fmtPrice(roe) + "%");
-                ticksSinceLastClose = 0; return;
+                System.out.println("💰 [硬止盈] ROE=" + fmtPrice(roe) + "% 达标！");
+                account.closePosition(currentPrice, "硬止盈 ROE=" + fmtPrice(roe) + "%");
+                peakROE = 0; ticksSinceLastClose = 0; return;
             }
+            // 3. 移动止盈：曾经赚到 +3% 以上，回撤超过一半就锁利
+            if (peakROE >= 3.0 && roe <= peakROE * 0.5) {
+                System.out.println("🔒 [移动止盈] 峰值ROE=" + fmtPrice(peakROE) + "% → 当前=" + fmtPrice(roe) + "% 回撤过多，锁利！");
+                account.closePosition(currentPrice, "移动止盈: 峰值" + fmtPrice(peakROE) + "%→当前" + fmtPrice(roe) + "%");
+                peakROE = 0; ticksSinceLastClose = 0; return;
+            }
+        } else {
+            peakROE = 0; // 空仓时重置
         }
 
         try {
@@ -118,8 +135,8 @@ public class TradingDecisionEngine {
                 "You are an HFT Planner. Output ONLY JSON.\n" +
                 "Inputs: Price=%.4f, RSI=%.2f, Macro='%s', Risk='%s', HasPos=%b%s.\n" +
                 "Rules:\n" +
-                "1. If HasPos=true and ROE < -8%%, output {\"decision\":\"CLOSE\", \"reason\":\"stop loss\"}\n" +
-                "2. If HasPos=true and ROE > 20%%, output {\"decision\":\"CLOSE\", \"reason\":\"take profit\"}\n" +
+                "1. If HasPos=true and ROE < -3%%, output {\"decision\":\"CLOSE\", \"reason\":\"stop loss\"}\n" +
+                "2. If HasPos=true and ROE > 5%%, output {\"decision\":\"CLOSE\", \"reason\":\"take profit\"}\n" +
                 "3. If HasPos=true and trend reverses against position, output {\"decision\":\"CLOSE\", \"reason\":\"...\"}\n" +
                 "4. If HasPos=false, RSI < 40 and Macro != BEAR_TREND, output {\"decision\":\"TRAP_LONG\", \"trigger_price\": <price slightly below current>, \"reason\":\"...\"}\n" +
                 "5. If HasPos=false, RSI > 60 and Macro != BULL_TREND, output {\"decision\":\"TRAP_SHORT\", \"trigger_price\": <price slightly above current>, \"reason\":\"...\"}\n" +
@@ -145,12 +162,12 @@ public class TradingDecisionEngine {
         // 🛑 核心防线：AI 解析失败时(理由为默认值)，启用程序化规则兜底
         boolean aiFailed = reason.equals("多智能体联合推演");
         if (aiFailed && hasPos) {
-            if (currentROE <= -8.0) {
+            if (currentROE <= -3.0) {
                 decision = "CLOSE";
-                reason = "程序兜底: 亏损超 -8% 强制止损";
-            } else if (currentROE >= 15.0) {
+                reason = "程序兜底: 亏损 " + fmtPrice(currentROE) + "% 止损";
+            } else if (currentROE >= 5.0) {
                 decision = "CLOSE";
-                reason = "程序兜底: 盈利超 +15% 主动止盈";
+                reason = "程序兜底: 盈利 +" + fmtPrice(currentROE) + "% 止盈";
             }
         }
         if (aiFailed && !hasPos && ticksSinceLastClose >= COOLDOWN_TICKS) {
