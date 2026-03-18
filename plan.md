@@ -1,5 +1,14 @@
 # 完整重构方案：RESTRUCTURE_PLAN.md 全量实现 + 动态杠杆/浮盈加仓/爆仓猎杀
 
+## 设计原则
+
+1. **前向验证优先** — 改完先跑模拟盘 2-4 周，不直接上实盘
+2. **参数不回测调优** — 所有权重/阈值基于金融常识设定，通过实时模拟验证，避免过拟合
+3. **Kelly 冷启动** — 前 50 笔用固定 3% 仓位，积累真实胜率后再切换 Kelly 公式
+4. **权重可配置** — 综合评分权重放入 Config.java，方便前向验证后微调
+
+---
+
 ## 现状对比
 
 ### 已实现（来自精简版 plan.md 第一轮重构）
@@ -16,14 +25,18 @@
 - [ ] **Config.java** — API Key 环境变量化（当前仍硬编码！）
 - [ ] **MarketDataHub.java** — 多流WebSocket（5个流合并）+ 心跳监控
 - [ ] **SignalEngine.java** — OBI/CVD/LCI/FundingRate/综合评分
-- [ ] **AuditLogger.java** — JSON Lines 审计日志
+- [ ] **AuditLogger.java** — JSON Lines 审计日志 + 告警
 - [ ] **MultiAgentOrchestrator.java** — 三模型重编排 + 输出消毒 + 否决权
 - [ ] **OrderManager.java** — 原子化订单 + 成交价追踪 + 滑点监控
 - [ ] **AI幻觉校验** — trigger_price ±2%、confidence校验、JSON schema
-- [ ] **动态仓位(Kelly)** — Kelly公式 + 波动率调整
+- [ ] **动态仓位(Kelly)** — Kelly公式 + 波动率调整（冷启动：前50笔固定3%）
 - [ ] **Prompt Injection防护** — agent输出消毒
-- [ ] **快通道信号系统** — 纯量化毫秒级通道
+- [ ] **快通道信号系统** — 纯量化毫秒级通道（放宽触发条件）
+- [ ] **模拟模式** — SimulationMode（保留 FuturesVirtualAccount 改造）
 - [ ] **清理** — 删除 config.properties、DirectKimiClient.java、更新 .gitignore
+- [ ] **修复 OpenClawGatewayClient** — cmd.exe → 跨平台兼容
+- [ ] **修复空 catch 块** — 全局排查空异常处理
+- [ ] **独立温度设置** — V3=0.1, R1=0.3, Kimi=0.3
 
 ---
 
@@ -101,6 +114,9 @@
 - 删除 config.properties 文件
 - 删除 DirectKimiClient.java（明文Key + 已废弃）
 - 添加 .gitignore（*.properties, .env, logs/）
+- **综合评分权重可配置**：OBI/CVD/RSI/LCI/BB/Funding/Vol 权重存入 Config
+- **快通道阈值可配置**：OBI 阈值、CVD 阈值等
+- **运行模式配置**：`TRADING_MODE` 环境变量 = `LIVE` 或 `SIMULATION`
 
 #### 1.2 新建 AuditLogger.java
 - JSON Lines 格式，每行一条记录
@@ -108,6 +124,17 @@
 - 文件路径：`logs/trading_YYYY-MM-DD.jsonl`（按天滚动）
 - 线程安全：synchronized write 或 BlockingQueue + 后台写入线程
 - 所有现有模块接入 AuditLogger
+- **告警机制**：
+  - Kill Switch 触发 → 写入 `logs/ALERT_YYYY-MM-DD.log` + stderr 输出
+  - 连亏 3 笔 → 告警
+  - 滑点 > 1% → 告警
+  - 日亏损 > 5% → 告警
+  - 告警接口预留 webhook（可选配置 `ALERT_WEBHOOK_URL` 环境变量）
+
+#### 1.3 修复全局空 catch 块
+- 排查 Main.java, BinanceRealAccount.java 等所有空 catch 块
+- 至少记录异常到 AuditLogger + stderr
+- 关键操作（下单、平仓）的异常不能静默吞掉
 
 ---
 
@@ -163,17 +190,19 @@
   - 负费率 < -0.01% → 空头拥挤，多头优势
   - 极端费率 > 0.05% → 禁止新开仓
 
-**综合评分公式：**
+**综合评分公式（权重从 Config.java 读取，可调）：**
 ```
-score = 0.25*OBI + 0.20*CVD_slope + 0.15*RSI + 0.15*LCI + 0.10*BB + 0.10*funding + 0.05*vol_surge
+score = w1*OBI + w2*CVD_slope + w3*RSI + w4*LCI + w5*BB + w6*funding + w7*vol_surge
+默认：0.25 + 0.20 + 0.15 + 0.15 + 0.10 + 0.10 + 0.05 = 1.0
 score > 0.6 → 强烈做多
 score < -0.6 → 强烈做空
 |score| < 0.3 → 观望
 ```
+- 权重通过前向模拟验证，**不通过回测优化**（避免过拟合）
 
-#### 3.2 IndicatorCalculator.java 处理
-- 技术指标计算逻辑迁入 SignalEngine
-- IndicatorCalculator 保留为 SignalEngine 的内部组件或删除
+#### 3.2 删除 IndicatorCalculator.java
+- 技术指标计算逻辑全部迁入 SignalEngine
+- 删除 IndicatorCalculator.java
 - 所有引用改为调用 SignalEngine
 
 ---
@@ -186,11 +215,11 @@ score < -0.6 → 强烈做空
 
 **三模型重新编排：**
 
-| 角色 | 模型 | 频率 | 输入数据（信息隔离） | 输出 |
-|------|------|------|---------------------|------|
-| MIO (Kimi 32K) | moonshot-v1-32k | 60s | 30分钟完整行情摘要 + OBI/CVD/LCI汇总 | 市场体制(TRENDING_UP/DOWN/RANGING/VOLATILE) |
-| RRO (R1 推理) | deepseek-reasoner | 30s | 当前仓位 + 近5笔交易 + 异常信号 | 风险等级 + 最大允许仓位 + 理由 |
-| TEO (V3 快速) | deepseek-chat | 15s | 技术指标 + 综合评分 + MIO体制 | JSON {action, side, confidence, trigger_price, reason} |
+| 角色 | 模型 | 频率 | 温度 | 输入数据（信息隔离） | 输出 |
+|------|------|------|------|---------------------|------|
+| MIO (Kimi 32K) | moonshot-v1-32k | 60s | 0.3 | 30分钟完整行情摘要 + OBI/CVD/LCI汇总 | 市场体制(TRENDING_UP/DOWN/RANGING/VOLATILE) |
+| RRO (R1 推理) | deepseek-reasoner | 30s | 0.3 | 当前仓位 + 近5笔交易 + 异常信号 | 风险等级 + 最大允许仓位 + 理由 |
+| TEO (V3 快速) | deepseek-chat | 15s | 0.1 | 技术指标 + 综合评分 + MIO体制 | JSON {action, side, confidence, trigger_price, reason} |
 
 **否决权机制：**
 - TEO 输出 → RRO 事后审核
@@ -213,12 +242,20 @@ score < -0.6 → 强烈做空
 - 保留：activeTrap 机制、快速检查、执行逻辑
 - 集成 SignalEngine 的综合评分（替代纯 RSI 判断）
 - 集成 MultiAgentOrchestrator（替代直接调用 OpenClawGatewayClient）
+- **修复竞态条件**：`tickCount`, `peakROE`, `trailingActive`, `ticksSinceLastClose` 改为 volatile
 
-#### 4.3 增强 OpenClawGatewayClient.java
+#### 4.3 修复 OpenClawGatewayClient.java
+- **修复平台兼容性**：检测 OS，Linux/Mac 用 `/bin/sh -c`，Windows 用 `cmd.exe /c`
 - 添加调用超时 + 重试（最多2次）
 - 添加模型版本追踪（记录每次调用的 agent 版本）
 - 修复 prompt injection：对 prompt 内容转义处理
+- 修复 shell 元字符注入漏洞
 - 所有调用结果记入 AuditLogger
+
+#### 4.4 合并 IntelligenceBoard.java 到 MultiAgentOrchestrator
+- IntelligenceBoard 的 AtomicReference 功能并入 MultiAgentOrchestrator
+- MultiAgentOrchestrator 内部维护 MIO/RRO 的最新输出
+- 删除独立的 IntelligenceBoard.java
 
 ---
 
@@ -246,6 +283,7 @@ score < -0.6 → 强烈做空
 **LIMIT 单支持：**
 - 默认使用 LIMIT 单（价格 = 当前价 ±0.1%）
 - LIMIT 单 5 秒未成交 → 自动取消 + 转 MARKET 单
+- **LIMIT → MARKET 互斥锁**：取消 LIMIT 和发送 MARKET 用同一把锁 + 状态检查，防止双倍仓位
 - 减少被 MEV/夹子攻击的风险
 
 #### 5.2 简化 BinanceRealAccount.java
@@ -260,10 +298,11 @@ score < -0.6 → 强烈做空
 **目标：毫秒级纯量化通道，不经 AI，提升交易频率 5-10 倍**
 
 #### 6.1 在 TradingDecisionEngine 中新增快通道
-**触发条件（三者同时满足）：**
-- |OBI| > 0.4（订单簿极端失衡）
-- CVD 方向与 OBI 一致（非 spoofing 确认）
-- 价格突破 Bollinger Band（上轨或下轨）
+**触发条件（两个条件 AND 即可，放宽阈值）：**
+- |OBI| > 0.3（订单簿显著失衡） + CVD 方向与 OBI 一致
+- **或** |OBI| > 0.3 + 价格突破 Bollinger Band
+- **或** CVD 方向一致 + 价格突破 Bollinger Band
+- （阈值可通过 Config.java 配置，前向验证后调整）
 
 **执行参数：**
 - 仓位：基础仓位的 30%（小仓试探）
@@ -290,6 +329,9 @@ score < -0.6 → 强烈做空
   volAdjust = BASE_VOL / currentVol  // 高波动缩仓
   positionSize = kelly * volAdjust * walletBalance
   ```
+- **冷启动策略**：前 50 笔交易用固定 3% 仓位，期间累积真实 winRate 和 avgWinLoss
+- 第 51 笔起切换 Kelly 公式，且每 20 笔重新计算一次历史胜率
+- winRate/avgWinLoss 持久化到审计日志，重启后可恢复
 - 新增频率限制：最小间隔30秒、每小时≤20笔、每日≤100笔
 
 #### 7.2 DynamicLeverageEngine 增强
@@ -303,18 +345,46 @@ score < -0.6 → 强烈做空
 
 ---
 
-### Phase 8: 清理 + 集成测试
-**目标：删除废弃代码，确保所有层正确串联**
+### Phase 8: 模拟模式 + 清理 + 集成
+**目标：安全验证 + 删除废弃代码 + 确保所有层正确串联**
 
-#### 8.1 删除废弃文件
+#### 8.1 改造 FuturesVirtualAccount → SimulationMode
+- **不删除 FuturesVirtualAccount**，改名为 `SimulationAccount.java`
+- 实现与 BinanceRealAccount 相同的接口（openPosition/closePosition/sendOrder）
+- 接收真实行情（从 MarketDataHub），但下单只记录不发送
+- 模拟成交：MARKET 单用当前价 + 随机滑点(0-0.1%)，LIMIT 单检查价格匹配
+- 模拟手续费：0.04% taker, 0.02% maker
+- 所有模拟交易记入 AuditLogger（type=SIMULATED_ORDER）
+- 通过 `Config.TRADING_MODE` 切换：`SIMULATION` 用 SimulationAccount，`LIVE` 用 BinanceRealAccount
+
+#### 8.2 前向验证流程
+```
+第 1-2 周：SIMULATION 模式
+  - 真实行情 + 真实 AI 决策 + 模拟下单
+  - 每日检查 AuditLogger：胜率、最大回撤、信号质量
+  - 观察快通道触发频率是否合理
+  - 观察 AI 决策延迟是否影响入场
+
+第 3 周：LIVE 模式 + 最小仓位
+  - INITIAL_CAPITAL 设为最低值（如 20 USDT）
+  - Kelly 冷启动（固定 3% 仓位）
+  - 验证实际滑点、成交价追踪是否正常
+
+第 4 周+：正常运行
+  - 根据前 3 周数据微调 Config 中的权重/阈值
+  - Kelly 公式接管仓位管理
+```
+
+#### 8.3 删除废弃文件
 - 删除 `DirectKimiClient.java`（硬编码Key + 已被 OpenClawGatewayClient 替代）
 - 删除 `config.properties`（API Key 明文）
 - 删除 `BinanceRealTrader.java`（未使用的 Spot 测试类）
-- 删除 `VirtualAccount.java`（未使用的模拟类）
-- 删除 `FuturesVirtualAccount.java`（已被真实账户替代）
+- 删除 `VirtualAccount.java`（Spot 模拟，不需要）
+- ~~删除 `FuturesVirtualAccount.java`~~ → 改造为 SimulationAccount.java
 - 删除 `TestDestruction.java`（demo 测试代码）
+- 删除 `IntelligenceBoard.java`（已合并入 MultiAgentOrchestrator）
 
-#### 8.2 更新 .gitignore
+#### 8.4 更新 .gitignore
 ```
 *.properties
 .env
@@ -322,54 +392,53 @@ logs/
 kill_switch.flag
 ```
 
-#### 8.3 更新 pom.xml
+#### 8.5 更新 pom.xml
 - 如需要新依赖（如 JSON Schema 校验库）则添加
 
-#### 8.4 Main.java 最终整合
+#### 8.6 Main.java 最终整合
 - 启动顺序：Config → AuditLogger → MarketDataHub → SignalEngine → RiskManager → OrderManager → MultiAgentOrchestrator → TradingDecisionEngine → 就绪
+- 根据 Config.TRADING_MODE 选择 SimulationAccount 或 BinanceRealAccount
 - 所有组件通过 MarketDataHub 获取数据
 - 所有交易通过 OrderManager 执行
 - 所有决策通过 AuditLogger 记录
+- 启动时打印运行模式（SIMULATION / LIVE）到 stderr + AuditLogger
 
 ---
 
 ## 文件清单总览
 
-### 新建文件（6个）
+### 新建文件（7个）
 | 文件 | 职责 | Phase |
 |------|------|-------|
-| Config.java | 环境变量加载 + 配置管理 | 1 |
-| AuditLogger.java | JSON Lines 审计日志 | 1 |
+| Config.java | 环境变量 + 配置管理 + 权重/阈值 | 1 |
+| AuditLogger.java | JSON Lines 审计日志 + 告警 | 1 |
 | MarketDataHub.java | 多流 WebSocket + 心跳 + 数据分发 | 2 |
 | SignalEngine.java | OBI/CVD/LCI/Funding/综合评分 | 3 |
-| MultiAgentOrchestrator.java | 三模型编排 + 消毒 + 否决权 | 4 |
-| OrderManager.java | 原子订单 + 成交价追踪 + 滑点 | 5 |
+| MultiAgentOrchestrator.java | 三模型编排 + 消毒 + 否决权 + 温度控制 | 4 |
+| OrderManager.java | 原子订单 + 成交价追踪 + 滑点 + LIMIT互斥锁 | 5 |
+| SimulationAccount.java | 模拟交易（改造自 FuturesVirtualAccount） | 8 |
 
-### 重构文件（6个）
+### 重构文件（7个）
 | 文件 | 改动 | Phase |
 |------|------|-------|
-| Main.java | 简化为启动入口 | 2, 8 |
-| TradingDecisionEngine.java | 接入新引擎 + 快通道 | 4, 6 |
+| Main.java | 简化为启动入口 + 模式切换 | 2, 8 |
+| TradingDecisionEngine.java | 接入新引擎 + 快通道 + 修复竞态变量 | 4, 6 |
 | BinanceRealAccount.java | 拆分订单逻辑到 OrderManager | 5 |
-| RiskManager.java | + Kelly仓位 + 频率限制 | 7 |
+| OpenClawGatewayClient.java | 跨平台兼容 + 超时重试 + 消毒 | 4 |
+| RiskManager.java | + Kelly仓位(冷启动) + 频率限制 | 7 |
 | DynamicLeverageEngine.java | + 综合评分驱动 | 7 |
-| PyramidManager.java | + OBI确认 | 7 |
-
-### 保留不变（2个）
-| 文件 | 原因 |
-|------|------|
-| IntelligenceBoard.java | 已线程安全，仍作为AI输出板使用 |
-| OpenClawGatewayClient.java | Phase 4 增强但保留 |
+| PyramidManager.java | + OBI确认 + 修复层数off-by-one | 7 |
 
 ### 删除文件（6个）
 | 文件 | 原因 | Phase |
 |------|------|-------|
 | config.properties | 明文 Key | 1 |
 | DirectKimiClient.java | 硬编码Key + 废弃 | 1 |
-| BinanceRealTrader.java | 未使用 | 8 |
-| VirtualAccount.java | 未使用 | 8 |
-| FuturesVirtualAccount.java | 已被真实账户替代 | 8 |
+| BinanceRealTrader.java | 未使用的 Spot 类 | 8 |
+| VirtualAccount.java | Spot 模拟，不需要 | 8 |
 | TestDestruction.java | demo 代码 | 8 |
+| IntelligenceBoard.java | 合并入 MultiAgentOrchestrator | 4 |
+| IndicatorCalculator.java | 合并入 SignalEngine | 3 |
 
 ---
 
@@ -391,7 +460,7 @@ Binance WebSocket (5 streams)
    └─ Composite Score (综合评分)
           │
           ├──────────── 快通道 ─────────────────┐
-          │  (|OBI|>0.4 + CVD一致 + BB突破)      │
+          │  (|OBI|>0.3 + CVD一致 或其他组合)     │
           │                                     │
           ▼                                     ▼
    MultiAgentOrchestrator ─── 慢通道 ──→ TradingDecisionEngine
@@ -411,8 +480,36 @@ Binance WebSocket (5 streams)
    └─ 止损原子设置
           │
           ▼
-   BinanceRealAccount ── REST API
+   BinanceRealAccount / SimulationAccount ── 按 Config.TRADING_MODE 切换
           │
           ▼
-   AuditLogger ── 全链路记录
+   AuditLogger ── 全链路记录 + 告警
 ```
+
+---
+
+## 已知风险与缓解措施
+
+| 风险 | 严重度 | 缓解措施 |
+|------|--------|---------|
+| AI 决策延迟 20-40s，入场价已不利 | 中 | 快通道补偿 + TEO trigger_price ±2% 校验 |
+| 综合评分权重未经验证 | 中 | 权重可配置 + 前向模拟验证 + 不回测调优 |
+| OBI 易被 spoofing 操纵 | 中 | CVD 交叉验证 + OBI 权重不宜过高 |
+| LIMIT 转 MARKET 可能双倍仓位 | 高 | 互斥锁 + 状态检查（Phase 5 解决） |
+| Kelly 冷启动期无历史数据 | 低 | 前 50 笔固定 3% 仓位 |
+| 单币种 SOLUSDT 低波动期空转 | 低 | 暂不解决，后续版本扩展多币种 |
+
+---
+
+## 关于回测的说明
+
+**本方案不使用回测来优化参数。** 原因：
+
+1. LLM 决策无法回测（模型版本会变、同 prompt 不保证同输出）
+2. 量化参数（权重、阈值）通过回测优化会过拟合（backtest overfitting）
+3. 正确做法是**前向验证**（forward testing）：
+   - 参数基于金融常识 / 业界经验设定
+   - 用实时行情 + SimulationAccount 跑 2-4 周
+   - 观察真实表现后微调
+   - 微调后再跑 1-2 周验证
+   - 确认稳定后切换 LIVE 模式
