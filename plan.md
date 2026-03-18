@@ -124,14 +124,45 @@
 - 文件路径：`logs/trading_YYYY-MM-DD.jsonl`（按天滚动）
 - 线程安全：synchronized write 或 BlockingQueue + 后台写入线程
 - 所有现有模块接入 AuditLogger
-- **告警机制**：
-  - Kill Switch 触发 → 写入 `logs/ALERT_YYYY-MM-DD.log` + stderr 输出
-  - 连亏 3 笔 → 告警
-  - 滑点 > 1% → 告警
-  - 日亏损 > 5% → 告警
-  - 告警接口预留 webhook（可选配置 `ALERT_WEBHOOK_URL` 环境变量）
+- **告警机制（通过 OpenClaw → Telegram 推送）**：
+  - 告警通道：调用 OpenClawGatewayClient 发送消息给一个专用 notification agent，由 OpenClaw 转发到 Telegram
+  - Kill Switch 触发 → Telegram 推送 + `logs/ALERT_YYYY-MM-DD.log`
+  - 连亏 3 笔 → Telegram 推送
+  - 滑点 > 1% → Telegram 推送
+  - 日亏损 > 5% → Telegram 推送
+  - 每笔交易执行后 → Telegram 摘要（方向/数量/入场价/杠杆/预期止盈止损）
+  - 每小时汇总 → Telegram 报告（余额/持仓/今日 PnL/胜率/交易次数）
+  - 告警防刷：同类告警 5 分钟内只发一次，防止 Telegram 消息轰炸
+  - 告警发送异步（不阻塞交易主线程），失败静默记录到本地日志
 
-#### 1.3 修复全局空 catch 块
+#### 1.3 新建 TelegramNotifier.java
+- 封装通过 OpenClawGatewayClient 发送 Telegram 通知的逻辑
+- 消息格式化：
+  ```
+  🔴 KILL SWITCH 触发
+  原因：日亏损 -5.2 USDT (10.4%)
+  余额：44.8 USDT
+  时间：2026-03-18 14:30:05
+  ```
+  ```
+  📊 交易执行
+  方向：LONG | 杠杆：10x
+  入场：$150.25 | 数量：5 SOL
+  止盈：$151.50 (1% ROE)
+  止损：$149.50 (-0.5% ROE)
+  信号来源：快通道 (OBI=0.38, CVD↑)
+  ```
+  ```
+  📈 每小时报告
+  余额：52.3 USDT (+2.3)
+  今日 PnL：+4.6%
+  胜率：7/10 (70%)
+  持仓：LONG 3 SOL @ $150.25
+  ```
+- 异步发送：用 CompletableFuture，不阻塞主流程
+- 限流：同类消息 5 分钟去重（用 HashMap<alertType, lastSentTime>）
+
+#### 1.4 修复全局空 catch 块
 - 排查 Main.java, BinanceRealAccount.java 等所有空 catch 块
 - 至少记录异常到 AuditLogger + stderr
 - 关键操作（下单、平仓）的异常不能静默吞掉
@@ -407,11 +438,12 @@ kill_switch.flag
 
 ## 文件清单总览
 
-### 新建文件（7个）
+### 新建文件（8个）
 | 文件 | 职责 | Phase |
 |------|------|-------|
 | Config.java | 环境变量 + 配置管理 + 权重/阈值 | 1 |
 | AuditLogger.java | JSON Lines 审计日志 + 告警 | 1 |
+| TelegramNotifier.java | 通过 OpenClaw 推送 Telegram 通知 | 1 |
 | MarketDataHub.java | 多流 WebSocket + 心跳 + 数据分发 | 2 |
 | SignalEngine.java | OBI/CVD/LCI/Funding/综合评分 | 3 |
 | MultiAgentOrchestrator.java | 三模型编排 + 消毒 + 否决权 + 温度控制 | 4 |
