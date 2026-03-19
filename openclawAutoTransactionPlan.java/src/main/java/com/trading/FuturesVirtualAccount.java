@@ -235,6 +235,15 @@ public class FuturesVirtualAccount implements TradingAccount {
     public synchronized double getPositionSize() { return positionSize; }
     public synchronized double getEntryPrice() { return entryPrice; }
 
+    /**
+     * 从子弹仓划拨资金给网格引擎（仅启动时调用一次）
+     */
+    public synchronized double allocateFromBullet(double amount) {
+        double actual = Math.min(amount, bulletBalance);
+        bulletBalance -= actual;
+        return actual;
+    }
+
     public synchronized void printStatus(double price) {
         double total = getWalletBalance();
         double totalPnlPct = (total - initialCapital) / initialCapital * 100.0;
