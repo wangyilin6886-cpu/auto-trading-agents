@@ -317,6 +317,11 @@ public class BinanceRealAccount implements TradingAccount {
     public synchronized double getWalletBalance() { return vaultBalance + bulletBalance; }
     public synchronized double getVaultBalance() { return vaultBalance; }
     public synchronized double getBulletBalance() { return bulletBalance; }
+    public synchronized double allocateFromBullet(double amount) {
+        double actual = Math.min(amount, bulletBalance);
+        bulletBalance -= actual;
+        return actual;
+    }
     public synchronized String getPositionSide() { return positionSide; }
     public synchronized double getPositionSize() { return positionSize; }
     public synchronized double getEntryPrice() { return entryPrice; }

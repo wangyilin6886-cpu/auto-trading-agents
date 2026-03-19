@@ -25,6 +25,7 @@ public interface TradingAccount {
     double getWalletBalance();      // 总资金
     double getVaultBalance();       // 安全金库
     double getBulletBalance();      // 子弹仓
+    double allocateFromBullet(double amount); // 从子弹仓划拨资金给子引擎
     void recycleProfit(double pnl); // 利润回流：50%进金库，50%加子弹
 
     // 仓位信息

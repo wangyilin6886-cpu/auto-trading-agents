@@ -3,17 +3,18 @@ package com.trading;
 import java.util.Locale;
 
 /**
- * Pulse Engine v1.0 - 四模式自动切换交易引擎
+ * Pulse Engine v2.0 - 六模式自适应交易引擎
  *
- * 根据实时市场波动率/动量/加速度自动切换交易模式：
+ * v1.0 四模式 + v2.0 新增：
+ *   - 仓位呼吸(Position Breathing)：趋势模式下动态加减仓
+ *   - 时区猎杀(SessionKiller)：根据全球时区自动调参
+ *   - 新增子引擎接入点：WickHarvester / SqueezeDetonator / LiquidationHunter
+ *
+ * 核心模式：
  *   CALM     (平静期) → 网格套利，低杠杆高频薅羊毛
- *   TREND    (趋势期) → 动量追踪，中杠杆顺势而为
+ *   TREND    (趋势期) → 动量追踪 + 仓位呼吸，中杠杆顺势而为
  *   STORM    (风暴期) → 级联冲浪，高杠杆骑清算瀑布
  *   HURRICANE(飓风期) → 防御模式，平仓观望保命
- *
- * 核心创新：加速度检测 + 级联冲浪（STORM模式）
- *   - 连续3个周期加速 → 入场骑浪
- *   - 检测减速 → 退出并反转
  */
 public class PulseEngine {
 
@@ -53,13 +54,18 @@ public class PulseEngine {
     // ===== 网格子引擎 (CALM) =====
     private final GridTradingEngine gridEngine;
 
-    // ===== 趋势仓位 (TREND) =====
+    // ===== 趋势仓位 (TREND) + 仓位呼吸 =====
     private String trendSide = "NONE";
     private double trendEntryPrice = 0;
     private double trendSize = 0;
     private double trendMargin = 0;
     private int trendLeverage = 10;
     private double trendPeakROE = 0;
+    private double trendMaxMargin = 0;       // 呼吸模式：最大保证金上限
+    private int breatheInCount = 0;          // 加仓次数
+    private int breatheOutCount = 0;         // 减仓次数
+    private long lastBreatheTime = 0;        // 上次呼吸时间
+    private static final long BREATHE_COOLDOWN_MS = 5000; // 呼吸间隔至少5秒
 
     // ===== 冲浪仓位 (STORM) =====
     private String surfSide = "NONE";
@@ -100,13 +106,15 @@ public class PulseEngine {
         this.gridEngine = new GridTradingEngine(gridFund, 6, 0.0025, 5, account);
 
         System.out.println("=================================================");
-        System.out.println("  PULSE ENGINE v1.0 - Adaptive Mode Switching");
+        System.out.println("  PULSE ENGINE v2.0 - Adaptive + Breathing");
         System.out.println("=================================================");
         System.out.println("  Grid fund:    " + fmt(gridFund) + " USDT (35%)");
         System.out.println("  Trend fund:   " + fmt(trendFund) + " USDT (30%)");
         System.out.println("  Surf fund:    " + fmt(surfFund) + " USDT (25%)");
         System.out.println("  Reserve fund: " + fmt(reserveFund) + " USDT (10%)");
         System.out.println("  Total:        " + fmt(fund) + " USDT");
+        System.out.println("  Session:      " + SessionKiller.getCurrentSession());
+        System.out.println("  Leverage adj: " + SessionKiller.getLeverageMultiplier() + "x");
         System.out.println("=================================================\n");
     }
 
@@ -114,6 +122,9 @@ public class PulseEngine {
     // 核心入口：每个tick调用
     // ==========================================
     public synchronized void onTick(double price, double volume) {
+        // 0. 时区检查
+        SessionKiller.checkAndPrintSessionChange();
+
         // 1. 记录历史数据
         recordData(price, volume);
 
@@ -129,7 +140,7 @@ public class PulseEngine {
         double acceleration = calcAcceleration();
         double volumeSurge = calcVolumeSurge();
 
-        // 4. 判断模式
+        // 4. 判断模式（时区调整信号门槛）
         MarketMode newMode = detectMode(volatility, momentum, acceleration, volumeSurge);
         if (newMode != currentMode) {
             handleModeSwitch(currentMode, newMode, price);
@@ -141,7 +152,7 @@ public class PulseEngine {
                 executeCalmMode(price);
                 break;
             case TREND:
-                executeTrendMode(price, momentum, volatility);
+                executeTrendMode(price, momentum, volatility, acceleration);
                 break;
             case STORM:
                 executeStormMode(price, acceleration, momentum, volumeSurge);
@@ -163,13 +174,11 @@ public class PulseEngine {
     // 数据记录
     // ==========================================
     private void recordData(double price, double volume) {
-        // 记录价格/成交量
         priceHistory[historyIndex] = price;
         volumeHistory[historyIndex] = volume;
         historyIndex = (historyIndex + 1) % WINDOW;
         if (historyIndex == 0) historyFull = true;
 
-        // 计算周期变化率 (每5个tick算一个周期)
         if (historyFull && historyIndex % 5 == 0) {
             int prevIdx = (historyIndex - 5 + WINDOW) % WINDOW;
             double change = (price - priceHistory[prevIdx]) / priceHistory[prevIdx];
@@ -183,7 +192,6 @@ public class PulseEngine {
     // 市场状态指标计算
     // ==========================================
 
-    /** 波动率 = 窗口内价格标准差 / 均价 */
     private double calcVolatility() {
         double sum = 0, sumSq = 0;
         for (int i = 0; i < WINDOW; i++) {
@@ -195,7 +203,6 @@ public class PulseEngine {
         return Math.sqrt(Math.max(0, variance)) / mean;
     }
 
-    /** 动量 = 当前价格相对窗口起点的变化率 */
     private double calcMomentum() {
         int oldest = historyFull ? historyIndex : 0;
         int newest = (historyIndex - 1 + WINDOW) % WINDOW;
@@ -203,7 +210,6 @@ public class PulseEngine {
         return (priceHistory[newest] - priceHistory[oldest]) / priceHistory[oldest];
     }
 
-    /** 加速度 = 当前周期变化率 - 上一周期变化率 (核心创新) */
     private double calcAcceleration() {
         if (!changesFull && changeIndex < 2) return 0;
         int cur = (changeIndex - 1 + periodChanges.length) % periodChanges.length;
@@ -211,11 +217,9 @@ public class PulseEngine {
         return periodChanges[cur] - periodChanges[prev];
     }
 
-    /** 成交量涌浪倍数 */
     private double calcVolumeSurge() {
         double recent = 0, older = 0;
         int newest = (historyIndex - 1 + WINDOW) % WINDOW;
-        // 最近5个 vs 之前10个的均值
         for (int i = 0; i < 5; i++) {
             int idx = (newest - i + WINDOW) % WINDOW;
             recent += volumeHistory[idx];
@@ -233,20 +237,17 @@ public class PulseEngine {
     // 模式检测
     // ==========================================
     private MarketMode detectMode(double vol, double momentum, double accel, double volumeSurge) {
-        // HURRICANE: 极端波动
         if (vol > VOL_HURRICANE_MIN) return MarketMode.HURRICANE;
 
-        // STORM: 高波动 + 量能暴增 + 有加速
-        if (vol > VOL_TREND_MAX && volumeSurge >= 2.0 && Math.abs(accel) > 0.0005) {
+        // 时区调整：信号门槛倍率
+        double threshold = SessionKiller.getSignalThresholdMultiplier();
+
+        if (vol > VOL_TREND_MAX && volumeSurge >= 2.0 * threshold && Math.abs(accel) > 0.0005) {
             return MarketMode.STORM;
         }
-
-        // TREND: 中等波动 + 有明确方向
         if (vol > VOL_CALM_MAX && Math.abs(momentum) > 0.001) {
             return MarketMode.TREND;
         }
-
-        // CALM: 低波动
         return MarketMode.CALM;
     }
 
@@ -258,33 +259,23 @@ public class PulseEngine {
         if (now - lastModeSwitchTime < MODE_SWITCH_COOLDOWN) return;
 
         System.out.println("\n>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>");
-        System.out.println("  [MODE SWITCH] " + from + " -> " + to);
+        System.out.println("  [MODE SWITCH] " + from + " -> " + to
+                + " | session=" + SessionKiller.getCurrentSession());
         System.out.println("  price=" + fmt(price));
         System.out.println(">>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>>\n");
 
-        // 切到HURRICANE：紧急平掉趋势和冲浪仓位
         if (to == MarketMode.HURRICANE) {
-            if (!trendSide.equals("NONE")) {
-                closeTrendPosition(price, "HURRICANE emergency");
-            }
-            if (!surfSide.equals("NONE")) {
-                closeSurfPosition(price, "HURRICANE emergency");
-            }
+            if (!trendSide.equals("NONE")) closeTrendPosition(price, "HURRICANE emergency");
+            if (!surfSide.equals("NONE")) closeSurfPosition(price, "HURRICANE emergency");
         }
 
-        // 切离STORM：平冲浪仓位
         if (from == MarketMode.STORM && to != MarketMode.STORM) {
-            if (!surfSide.equals("NONE")) {
-                closeSurfPosition(price, "Exit STORM mode");
-            }
+            if (!surfSide.equals("NONE")) closeSurfPosition(price, "Exit STORM mode");
             consecutiveAccel = 0;
         }
 
-        // 切离TREND：平趋势仓位
         if (from == MarketMode.TREND && to != MarketMode.TREND) {
-            if (!trendSide.equals("NONE")) {
-                closeTrendPosition(price, "Exit TREND mode");
-            }
+            if (!trendSide.equals("NONE")) closeTrendPosition(price, "Exit TREND mode");
         }
 
         currentMode = to;
@@ -299,43 +290,76 @@ public class PulseEngine {
     }
 
     // ==========================================
-    // TREND模式：动量追踪
+    // TREND模式：动量追踪 + 仓位呼吸
     // ==========================================
-    private void executeTrendMode(double price, double momentum, double volatility) {
+    private void executeTrendMode(double price, double momentum, double volatility, double acceleration) {
         // 网格照常运转
         gridEngine.onPriceUpdate(price);
 
+        // 时区检查
+        if (!SessionKiller.canOpenNewPosition() && trendSide.equals("NONE")) return;
+
         if (trendSide.equals("NONE")) {
-            // 开仓条件：动量明确 + RSI配合
             double rsi = IndicatorCalculator.getRSI(14);
             String trend = IndicatorCalculator.getTrend();
 
-            // 做多：动量为正 + RSI不过热 + 趋势BULL
+            // 时区调整杠杆
+            int adjustedLev = SessionKiller.adjustLeverage(trendLeverage);
+
             if (momentum > 0.002 && rsi < 65 && trend.equals("BULL")) {
-                openTrendPosition("LONG", price, "TREND momentum=" + fmtPct(momentum) + " RSI=" + fmt(rsi));
-            }
-            // 做空：动量为负 + RSI不过冷 + 趋势BEAR
-            else if (momentum < -0.002 && rsi > 35 && trend.equals("BEAR")) {
-                openTrendPosition("SHORT", price, "TREND momentum=" + fmtPct(momentum) + " RSI=" + fmt(rsi));
+                openTrendPosition("LONG", price, adjustedLev, "TREND momentum=" + fmtPct(momentum) + " RSI=" + fmt(rsi));
+            } else if (momentum < -0.002 && rsi > 35 && trend.equals("BEAR")) {
+                openTrendPosition("SHORT", price, adjustedLev, "TREND momentum=" + fmtPct(momentum) + " RSI=" + fmt(rsi));
             }
         } else {
-            // 持仓管理
+            // ========== 仓位呼吸：持仓管理 ==========
             double roe = getTrendROE(price);
             if (roe > trendPeakROE) trendPeakROE = roe;
 
-            // 止损 -10%
+            // 1. 止损 -10%
             if (roe <= -10.0) {
                 closeTrendPosition(price, "TREND stop loss ROE=" + fmt(roe) + "%");
                 return;
             }
 
-            // 止盈：峰值ROE>=8%后回撤40%
+            // 2. 止盈：峰值ROE>=8%后回撤40%
             if (trendPeakROE >= 8.0 && roe <= trendPeakROE * 0.6) {
                 closeTrendPosition(price, "TREND trailing peak=" + fmt(trendPeakROE) + "% now=" + fmt(roe) + "%");
                 return;
             }
 
-            // 动量反转平仓
+            // 3. 时区锁利：US_LATE/DEAD时段盈利>5%锁一半
+            if (SessionKiller.shouldLockProfit() && roe > 5.0) {
+                breatheOut(price, 0.50, "Session lock profit ROE=" + fmt(roe) + "%");
+                return;
+            }
+
+            // 4. 仓位呼吸逻辑
+            long now = System.currentTimeMillis();
+            if (now - lastBreatheTime > BREATHE_COOLDOWN_MS) {
+                // 吸气（加仓）：加速度 > 0 + ROE > 0 + 仓位未满
+                if (acceleration > 0.0002 && roe > 2.0 && trendMargin < trendMaxMargin * 0.80) {
+                    boolean correctDir = (trendSide.equals("LONG") && momentum > 0) ||
+                                         (trendSide.equals("SHORT") && momentum < 0);
+                    if (correctDir) {
+                        breatheIn(price, "Accel=" + fmtPct(acceleration) + " ROE=" + fmt(roe) + "%");
+                    }
+                }
+
+                // 呼气（减仓）：加速度 ≈ 0 或反向
+                if (Math.abs(acceleration) < 0.0001 && roe > 3.0 && breatheInCount > 0) {
+                    breatheOut(price, 0.30, "Flat accel, lock profit ROE=" + fmt(roe) + "%");
+                }
+
+                if (acceleration < -0.0002 && trendSide.equals("LONG") && roe > 0) {
+                    breatheOut(price, 0.40, "Decel detected ROE=" + fmt(roe) + "%");
+                }
+                if (acceleration > 0.0002 && trendSide.equals("SHORT") && roe > 0) {
+                    breatheOut(price, 0.40, "Decel detected ROE=" + fmt(roe) + "%");
+                }
+            }
+
+            // 5. 动量反转平仓
             if (trendSide.equals("LONG") && momentum < -0.001) {
                 closeTrendPosition(price, "TREND momentum reversed ROE=" + fmt(roe) + "%");
             } else if (trendSide.equals("SHORT") && momentum > 0.001) {
@@ -345,15 +369,77 @@ public class PulseEngine {
     }
 
     // ==========================================
+    // 仓位呼吸：吸气（加仓）
+    // ==========================================
+    private void breatheIn(double price, String reason) {
+        double addMargin = trendFund * 0.15; // 每次加仓15%趋势资金
+        if (addMargin < 1.0 || addMargin > trendFund * 0.5) return;
+
+        int adjustedLev = SessionKiller.adjustLeverage(trendLeverage);
+        double notional = addMargin * adjustedLev;
+        double addQty = notional / price;
+        double fee = notional * TAKER_FEE;
+
+        // 更新加权平均入场价
+        double totalNotional = trendEntryPrice * trendSize + price * addQty;
+        double newTotalSize = trendSize + addQty;
+        trendEntryPrice = totalNotional / newTotalSize;
+
+        trendSize = newTotalSize;
+        trendMargin += addMargin;
+        trendFund -= fee;
+        breatheInCount++;
+        lastBreatheTime = System.currentTimeMillis();
+
+        System.out.println("[BREATHE IN] +" + fmt(addMargin) + "U margin | total=" + fmt(trendMargin)
+                + "U size=" + fmt(trendSize) + " SOL | " + reason);
+    }
+
+    // ==========================================
+    // 仓位呼吸：呼气（减仓）
+    // ==========================================
+    private void breatheOut(double price, double fraction, String reason) {
+        if (trendSide.equals("NONE") || trendSize <= 0) return;
+        fraction = Math.max(0.1, Math.min(0.7, fraction));
+
+        double reduceSize = trendSize * fraction;
+        double reduceMargin = trendMargin * fraction;
+
+        // 计算减仓部分的PNL
+        double pnl;
+        if (trendSide.equals("LONG")) pnl = (price - trendEntryPrice) * reduceSize;
+        else pnl = (trendEntryPrice - price) * reduceSize;
+
+        double fee = reduceSize * price * TAKER_FEE;
+        double netPnl = pnl - fee;
+
+        trendSize -= reduceSize;
+        trendMargin -= reduceMargin;
+        trendFund += reduceMargin + netPnl;
+        recyclePulseProfit(netPnl, "trend");
+
+        if (netPnl > 0) {
+            totalProfit += netPnl;
+            winTrades++;
+        }
+        breatheOutCount++;
+        lastBreatheTime = System.currentTimeMillis();
+
+        String tag = netPnl >= 0 ? "+" : "";
+        System.out.println("[BREATHE OUT] -" + String.format("%.0f%%", fraction * 100) + " margin=" + fmt(reduceMargin)
+                + "U pnl=" + tag + fmt(netPnl) + "U | remaining=" + fmt(trendMargin) + "U | " + reason);
+
+        // 仓位太小就全平
+        if (trendMargin < 1.0 || trendSize < 0.001) {
+            closeTrendPosition(price, "Breathed out fully");
+        }
+    }
+
+    // ==========================================
     // STORM模式：级联冲浪 (核心创新)
     // ==========================================
     private void executeStormMode(double price, double acceleration, double momentum, double volumeSurge) {
-        // 网格暂停，专注冲浪
-        // (不调用gridEngine.onPriceUpdate，避免极端波动下网格大量止损)
-
         if (surfSide.equals("NONE")) {
-            // === 入场检测：连续加速 ===
-            // 加速度方向一致且递增 → 级联正在发生
             if (acceleration > 0.0003) {
                 consecutiveAccel++;
             } else if (acceleration < -0.0003) {
@@ -362,26 +448,25 @@ public class PulseEngine {
                 consecutiveAccel = 0;
             }
 
-            // 连续3个周期加速 → 入场骑浪
-            if (consecutiveAccel >= 3 && volumeSurge >= 2.5) {
-                // 价格在加速上涨 → 做多骑浪（空头清算级联）
-                openSurfPosition("LONG", price, "STORM cascade UP accel=" + fmtPct(acceleration) + " vol=" + fmt(volumeSurge) + "x");
-            } else if (consecutiveAccel <= -3 && volumeSurge >= 2.5) {
-                // 价格在加速下跌 → 做空骑浪（多头清算级联）
-                openSurfPosition("SHORT", price, "STORM cascade DOWN accel=" + fmtPct(acceleration) + " vol=" + fmt(volumeSurge) + "x");
+            // 时区调整量能门槛
+            double volThreshold = 2.5 * SessionKiller.getSignalThresholdMultiplier();
+
+            if (consecutiveAccel >= 3 && volumeSurge >= volThreshold) {
+                int adjustedLev = SessionKiller.adjustLeverage(surfLeverage);
+                openSurfPosition("LONG", price, adjustedLev, "STORM cascade UP accel=" + fmtPct(acceleration) + " vol=" + fmt(volumeSurge) + "x");
+            } else if (consecutiveAccel <= -3 && volumeSurge >= volThreshold) {
+                int adjustedLev = SessionKiller.adjustLeverage(surfLeverage);
+                openSurfPosition("SHORT", price, adjustedLev, "STORM cascade DOWN accel=" + fmtPct(acceleration) + " vol=" + fmt(volumeSurge) + "x");
             }
         } else {
-            // === 持仓管理：检测减速 ===
             double roe = getSurfROE(price);
 
-            // 紧急止损 -8%
             if (roe <= -8.0) {
                 closeSurfPosition(price, "STORM stop loss ROE=" + fmt(roe) + "%");
                 consecutiveAccel = 0;
                 return;
             }
 
-            // 检测减速/反转 → 获利退出
             boolean decelDetected = false;
             if (surfSide.equals("LONG") && acceleration < -0.0002) decelDetected = true;
             if (surfSide.equals("SHORT") && acceleration > 0.0002) decelDetected = true;
@@ -391,16 +476,14 @@ public class PulseEngine {
                 surfWaveCount++;
                 consecutiveAccel = 0;
 
-                // 减速后反转：如果加速度足够大，立刻反向开仓
                 if (Math.abs(acceleration) > 0.0005 && volumeSurge >= 2.0) {
                     String reverseSide = surfSide.equals("LONG") ? "SHORT" : "LONG";
-                    // surfSide已被closeSurfPosition重置为NONE
-                    openSurfPosition(reverseSide, price, "STORM reverse after decel wave#" + surfWaveCount);
+                    int adjustedLev = SessionKiller.adjustLeverage(surfLeverage);
+                    openSurfPosition(reverseSide, price, adjustedLev, "STORM reverse after decel wave#" + surfWaveCount);
                 }
                 return;
             }
 
-            // 已盈利但加速度归零 → 安全退出
             if (roe > 2.0 && Math.abs(acceleration) < 0.0001) {
                 closeSurfPosition(price, "STORM flat accel exit ROE=" + fmt(roe) + "%");
                 consecutiveAccel = 0;
@@ -413,17 +496,17 @@ public class PulseEngine {
     // ==========================================
     private void executeHurricaneMode(double price) {
         // 全部平仓已在handleModeSwitch中完成
-        // 这里只做监控，等波动率下降自动切回
     }
 
     // ==========================================
     // 趋势仓位管理
     // ==========================================
-    private void openTrendPosition(String side, double price, String reason) {
+    private void openTrendPosition(String side, double price, int lev, String reason) {
         if (trendFund < 3.0) return;
+        if (!SessionKiller.canOpenNewPosition()) return;
 
-        double margin = trendFund * 0.40; // 每次用40%趋势资金
-        double notional = margin * trendLeverage;
+        double margin = trendFund * 0.40;
+        double notional = margin * lev;
         double qty = notional / price;
         double fee = notional * TAKER_FEE;
 
@@ -432,25 +515,26 @@ public class PulseEngine {
         trendSize = qty;
         trendMargin = margin;
         trendPeakROE = 0;
+        trendMaxMargin = trendFund * 0.80; // 呼吸模式最大保证金=趋势资金的80%
+        breatheInCount = 0;
+        breatheOutCount = 0;
         trendFund -= fee;
 
-        System.out.println("[PULSE TREND OPEN] " + side + " margin=" + fmt(margin) + "U lev=" + trendLeverage
-                + "x size=" + fmt(qty) + " SOL | " + reason);
+        System.out.println("[PULSE TREND OPEN] " + side + " margin=" + fmt(margin) + "U lev=" + lev
+                + "x size=" + fmt(qty) + " SOL | " + reason
+                + " | session=" + SessionKiller.getCurrentSession());
     }
 
     private void closeTrendPosition(double price, String reason) {
         if (trendSide.equals("NONE")) return;
 
         double pnl;
-        if (trendSide.equals("LONG")) {
-            pnl = (price - trendEntryPrice) * trendSize;
-        } else {
-            pnl = (trendEntryPrice - price) * trendSize;
-        }
+        if (trendSide.equals("LONG")) pnl = (price - trendEntryPrice) * trendSize;
+        else pnl = (trendEntryPrice - price) * trendSize;
+
         double fee = trendSize * price * TAKER_FEE;
         double netPnl = pnl - fee;
 
-        // 利润分配
         trendFund += trendMargin + netPnl;
         recyclePulseProfit(netPnl, "trend");
 
@@ -460,13 +544,16 @@ public class PulseEngine {
 
         String tag = netPnl >= 0 ? "+" : "";
         System.out.println("[PULSE TREND CLOSE] " + trendSide + " " + reason
-                + " | pnl=" + tag + fmt(netPnl) + "U fund=" + fmt(trendFund) + "U");
+                + " | pnl=" + tag + fmt(netPnl) + "U fund=" + fmt(trendFund) + "U"
+                + " | breathe: in=" + breatheInCount + " out=" + breatheOutCount);
 
         trendSide = "NONE";
         trendEntryPrice = 0;
         trendSize = 0;
         trendMargin = 0;
         trendPeakROE = 0;
+        breatheInCount = 0;
+        breatheOutCount = 0;
     }
 
     private double getTrendROE(double price) {
@@ -480,11 +567,11 @@ public class PulseEngine {
     // ==========================================
     // 冲浪仓位管理
     // ==========================================
-    private void openSurfPosition(String side, double price, String reason) {
+    private void openSurfPosition(String side, double price, int lev, String reason) {
         if (surfFund < 3.0) return;
 
-        double margin = surfFund * 0.50; // 冲浪用50%资金（高风险高回报）
-        double notional = margin * surfLeverage;
+        double margin = surfFund * 0.50;
+        double notional = margin * lev;
         double qty = notional / price;
         double fee = notional * TAKER_FEE;
 
@@ -494,7 +581,7 @@ public class PulseEngine {
         surfMargin = margin;
         surfFund -= fee;
 
-        System.out.println("[PULSE SURF OPEN] " + side + " margin=" + fmt(margin) + "U lev=" + surfLeverage
+        System.out.println("[PULSE SURF OPEN] " + side + " margin=" + fmt(margin) + "U lev=" + lev
                 + "x size=" + fmt(qty) + " SOL | " + reason);
     }
 
@@ -502,15 +589,12 @@ public class PulseEngine {
         if (surfSide.equals("NONE")) return;
 
         double pnl;
-        if (surfSide.equals("LONG")) {
-            pnl = (price - surfEntryPrice) * surfSize;
-        } else {
-            pnl = (surfEntryPrice - price) * surfSize;
-        }
+        if (surfSide.equals("LONG")) pnl = (price - surfEntryPrice) * surfSize;
+        else pnl = (surfEntryPrice - price) * surfSize;
+
         double fee = surfSize * price * TAKER_FEE;
         double netPnl = pnl - fee;
 
-        // 利润分配
         surfFund += surfMargin + netPnl;
         recyclePulseProfit(netPnl, "surf");
 
@@ -544,11 +628,9 @@ public class PulseEngine {
 
         double toVault;
         if (source.equals("surf")) {
-            // 冲浪利润70%回流主账户（高风险收益要锁利润）
             toVault = pnl * 0.70;
             surfFund -= toVault;
         } else {
-            // 趋势利润50%回流
             toVault = pnl * 0.50;
             trendFund -= toVault;
         }
@@ -567,9 +649,10 @@ public class PulseEngine {
         double mom = historyFull ? calcMomentum() : 0;
         double accel = historyFull ? calcAcceleration() : 0;
 
-        System.out.println("============== [PULSE ENGINE STATUS] ==============");
-        System.out.println("  MODE: " + currentMode + " | volatility=" + fmtPct(vol)
-                + " momentum=" + fmtPct(mom) + " accel=" + fmtPct(accel));
+        System.out.println("============== [PULSE ENGINE v2.0 STATUS] ==============");
+        System.out.println("  MODE: " + currentMode + " | session=" + SessionKiller.getCurrentSession()
+                + " | levMul=" + SessionKiller.getLeverageMultiplier() + "x");
+        System.out.println("  volatility=" + fmtPct(vol) + " momentum=" + fmtPct(mom) + " accel=" + fmtPct(accel));
         System.out.println("  Fund: " + fmt(activeFund) + "U (" + (fundPnlPct >= 0 ? "+" : "") + fmt(fundPnlPct) + "%)");
         System.out.println("    grid=" + fmt(gridFund) + "U trend=" + fmt(trendFund)
                 + "U surf=" + fmt(surfFund) + "U reserve=" + fmt(reserveFund) + "U");
@@ -579,7 +662,9 @@ public class PulseEngine {
         if (!trendSide.equals("NONE")) {
             double roe = getTrendROE(price);
             System.out.println("  [TREND POS] " + trendSide + " entry=" + fmt(trendEntryPrice)
-                    + " size=" + fmt(trendSize) + " ROE=" + (roe >= 0 ? "+" : "") + fmt(roe) + "%");
+                    + " size=" + fmt(trendSize) + " margin=" + fmt(trendMargin) + "U"
+                    + " ROE=" + (roe >= 0 ? "+" : "") + fmt(roe) + "%"
+                    + " breathe: in=" + breatheInCount + " out=" + breatheOutCount);
         }
         if (!surfSide.equals("NONE")) {
             double roe = getSurfROE(price);
@@ -587,7 +672,7 @@ public class PulseEngine {
                     + " size=" + fmt(surfSize) + " ROE=" + (roe >= 0 ? "+" : "") + fmt(roe) + "%");
         }
         System.out.println("  Waves surfed: " + surfWaveCount);
-        System.out.println("===================================================");
+        System.out.println("========================================================");
     }
 
     // ==========================================
@@ -596,7 +681,6 @@ public class PulseEngine {
     public synchronized MarketMode getCurrentMode() { return currentMode; }
     public synchronized double getTotalProfit() { return totalProfit; }
     public synchronized int getTotalTrades() { return totalTrades; }
-
     public synchronized GridTradingEngine getGridEngine() { return gridEngine; }
 
     private String fmt(double v) { return String.format(Locale.US, "%.4f", v); }

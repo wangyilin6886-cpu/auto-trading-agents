@@ -126,15 +126,62 @@ public class IndicatorCalculator {
     }
 
     // ==========================================
-    // 布林带上轨
+    // 布林带
     // ==========================================
     public static synchronized double getBollingerUpper(int period) {
         if (prices.size() < period) return 0.0;
         double sma = getSma(period);
-        double sumOfSq = 0.0;
-        for (int i = prices.size() - period; i < prices.size(); i++) sumOfSq += Math.pow(prices.get(i) - sma, 2);
-        double stdDev = Math.sqrt(sumOfSq / period);
+        double stdDev = getBollingerStdDev(period, sma);
         return sma + (2 * stdDev);
+    }
+
+    public static synchronized double getBollingerLower(int period) {
+        if (prices.size() < period) return 0.0;
+        double sma = getSma(period);
+        double stdDev = getBollingerStdDev(period, sma);
+        return sma - (2 * stdDev);
+    }
+
+    public static synchronized double getBollingerMiddle(int period) {
+        return getSma(period);
+    }
+
+    /**
+     * 布林带宽度百分比 = (上轨 - 下轨) / 中轨 * 100
+     * 用于检测波动率压缩（Squeeze）
+     */
+    public static synchronized double getBollingerBandwidth(int period) {
+        if (prices.size() < period) return 999.0; // 数据不够返回大值，不触发squeeze
+        double sma = getSma(period);
+        if (sma == 0) return 999.0;
+        double stdDev = getBollingerStdDev(period, sma);
+        double upper = sma + 2 * stdDev;
+        double lower = sma - 2 * stdDev;
+        return (upper - lower) / sma * 100.0;
+    }
+
+    private static double getBollingerStdDev(int period, double sma) {
+        double sumOfSq = 0.0;
+        for (int i = prices.size() - period; i < prices.size(); i++) {
+            sumOfSq += Math.pow(prices.get(i) - sma, 2);
+        }
+        return Math.sqrt(sumOfSq / period);
+    }
+
+    /**
+     * 获取价格列表的副本（用于高频引擎的独立分析）
+     */
+    public static synchronized List<Double> getPriceSnapshot() {
+        return new ArrayList<>(prices);
+    }
+
+    public static synchronized double[] getRecentPrices(int count) {
+        int start = Math.max(0, prices.size() - count);
+        double[] result = new double[prices.size() - start];
+        for (int i = 0; i < result.length; i++) {
+            result[i] = prices.get(start + i);
+        }
+        return result;
     }
 
     // ==========================================
