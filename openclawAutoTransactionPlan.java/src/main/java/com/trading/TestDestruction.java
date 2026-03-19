@@ -3,57 +3,78 @@ package com.trading;
 public class TestDestruction {
 
     public static void main(String[] args) {
-        System.out.println("=== 💀 巨鲸收割者：破坏性演习开始 ===");
-        
-        // 你手里只有 500 U
-        FuturesVirtualAccount account = new FuturesVirtualAccount(500.0);
-        double currentPrice = 100.0;
+        System.out.println("=== Whale Harvester v5.0 - Stress Test ===\n");
+
+        // 140 USDT 初始资金 (≈1000 RMB)
+        FuturesVirtualAccount account = new FuturesVirtualAccount(140.0);
+        double currentPrice = 130.0;
 
         // ==========================================
-        // 场景 1：精准做空 (价格跌了，你赚钱)
+        // 场景1：B级信号做多 (10x, 20%子弹仓)
         // ==========================================
-        System.out.println("\n[场景1] R1察觉到砸盘，指示开 10倍 做空！");
-        // 拿 50 U 的本金，开 10 倍做空
-        account.openPosition("SHORT", currentPrice, 50.0, 10, "R1预判瀑布");
+        System.out.println("\n[Scene 1] B-signal LONG with 10x leverage");
+        double bulletPct = 0.20;
+        double margin = account.getBulletBalance() * bulletPct; // 42 * 0.20 = 8.4U
+        account.openPosition("LONG", currentPrice, margin, 10, "B-signal RSI=38 trend=NEUTRAL");
 
-        // 价格暴跌到 90
-        currentPrice = 90.0;
-        System.out.println("\n>>> 市场暴跌至 90 USDT，散户在哀嚎，我们在数钱...");
-        account.printStatus(currentPrice); // 此时ROE应该高达 +100%
+        // 涨2% → ROE ≈ +20%
+        currentPrice = 132.6;
+        System.out.println("\n>>> Price up 2% -> " + currentPrice);
+        System.out.println("    ROE = " + String.format("%.1f%%", account.getROE(currentPrice)));
+        account.printStatus(currentPrice);
 
-        // 止盈平仓
-        account.closePosition(currentPrice, "吃饱喝足，落袋为安");
+        // TP1 触发：平1/3
+        System.out.println("\n--- TP1: close 1/3 ---");
+        account.closePartial(currentPrice, 0.333, "TP1 ROE=+20%");
 
+        // 继续涨到 +40% ROE
+        currentPrice = 135.2;
+        System.out.println("\n>>> Price continues to " + currentPrice);
+        System.out.println("    ROE = " + String.format("%.1f%%", account.getROE(currentPrice)));
 
-        // ==========================================
-        // 场景 2：滚雪球暴击 (反马丁格尔)
-        // ==========================================
-        System.out.println("\n[场景2] V3加特林检测到超级信号，启动利润滚雪球！");
-        currentPrice = 100.0;
-        
-        // 提取刚才赚到的纯利润 (大概 49 U)
-        double profitToGamble = account.getRealizedProfit(); 
-        
-        // 拿赚来的纯利润，直接开 20 倍做多！输了本金一分不少！
-        account.openPosition("LONG", currentPrice, profitToGamble, 20, "拿利润去狂赌！");
+        // TP2 触发：再平1/3 (剩余的50%)
+        System.out.println("\n--- TP2: close half remaining ---");
+        account.closePartial(currentPrice, 0.50, "TP2 ROE=+40%");
 
-        // 价格稍微涨了 2块钱
-        currentPrice = 102.0;
-        System.out.println("\n>>> 市场拉升至 102 USDT...");
-        account.printStatus(currentPrice); // 感受一下 20 倍杠杆下，涨 2% 利润有多恐怖
-
+        // 最后1/3移动止盈平仓
+        currentPrice = 134.0;
+        System.out.println("\n--- Trailing stop: close remaining ---");
+        account.closePosition(currentPrice, "Trailing stop");
 
         // ==========================================
-        // 场景 3：死亡插针 (体验爆仓的绝望)
+        // 场景2：S级信号做空 (20x, 50%子弹仓)
         // ==========================================
-        System.out.println("\n[场景3] 突发黑天鹅，庄家恶意砸盘插针！");
-        currentPrice = 94.0; // 跌破了多单的爆仓价 (大概是 95 左右)
-        System.out.println(">>> 价格瞬间砸到 94 USDT...");
-        
-        // 每次价格变动，底层都会调用 checkLiquidation
-        boolean isDead = account.checkLiquidation(currentPrice);
-        if (isDead) {
-            System.out.println("系统报告：单子被交易所强制平仓。但你看一眼总金库，你的 500 U 初始本金还在不在？");
-        }
+        System.out.println("\n\n[Scene 2] S-signal SHORT with 20x leverage");
+        currentPrice = 130.0;
+        margin = account.getBulletBalance() * 0.50;
+        account.openPosition("SHORT", currentPrice, margin, 20, "S-signal RSI=80 BEAR vol=3x breakdown");
+
+        // 跌3% → ROE ≈ +60%
+        currentPrice = 126.1;
+        System.out.println("\n>>> Price drops 3% -> " + currentPrice);
+        System.out.println("    ROE = " + String.format("%.1f%%", account.getROE(currentPrice)));
+        account.closePosition(currentPrice, "Full take profit");
+
+        // ==========================================
+        // 场景3：止损测试 (价格反向)
+        // ==========================================
+        System.out.println("\n\n[Scene 3] Stop loss test");
+        currentPrice = 130.0;
+        margin = account.getBulletBalance() * 0.30;
+        account.openPosition("LONG", currentPrice, margin, 15, "A-signal test");
+
+        // 跌1% → 15x杠杆下 ROE ≈ -15%
+        currentPrice = 129.0;
+        System.out.println("\n>>> Price drops to " + currentPrice);
+        System.out.println("    ROE = " + String.format("%.1f%%", account.getROE(currentPrice)));
+        account.closePosition(currentPrice, "STOP LOSS ROE=-15%");
+
+        // ==========================================
+        // 最终状态
+        // ==========================================
+        System.out.println("\n\n=== FINAL STATUS ===");
+        account.printStatus(130.0);
+        System.out.println("Vault preserved: " + String.format("%.2f", account.getVaultBalance()) + " USDT");
+        System.out.println("Bullet remaining: " + String.format("%.2f", account.getBulletBalance()) + " USDT");
     }
 }

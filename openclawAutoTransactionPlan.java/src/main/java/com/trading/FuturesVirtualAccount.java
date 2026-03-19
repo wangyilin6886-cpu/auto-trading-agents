@@ -2,51 +2,80 @@ package com.trading;
 
 import java.util.Locale;
 
+/**
+ * 合约模拟账户 v2.0
+ * - 金库(70%) / 子弹仓(30%) 资金分离
+ * - 逐仓隔离模式
+ * - 分批平仓支持
+ * - 利润回流机制
+ * - 全线程安全
+ */
 public class FuturesVirtualAccount implements TradingAccount {
 
-    // ===== 资金中心 (本金与利润严格分离) =====
-    private final double initialCapital; // 初始本金 (绝不动用超过风控比例)
-    private double walletBalance;        // 钱包总余额 (本金 + 已实现利润)
-    private double realizedProfit;       // 累计真金白银利润
+    // ===== 资金分离架构 =====
+    private final double initialCapital;
+    private double vaultBalance;        // 安全金库 (70%) - 保命钱
+    private double bulletBalance;       // 子弹仓 (30%) - 作战资金
+    private double realizedProfit;
 
-    // ===== 仓位雷达 (逐仓模式 Isolated) =====
-    private String positionSide = "NONE"; // LONG(做多), SHORT(做空), NONE(空仓)
-    private double positionSize = 0.0;    // 持仓数量 (SOL)
-    private double entryPrice = 0.0;      // 开仓均价
-    private int leverage = 1;             // 当前杠杆倍数
-    private double isolatedMargin = 0.0;  // 逐仓冻结保证金
+    // ===== 仓位信息 =====
+    private String positionSide = "NONE";
+    private double positionSize = 0.0;      // 持仓数量 (SOL)
+    private double entryPrice = 0.0;
+    private int leverage = 1;
+    private double isolatedMargin = 0.0;    // 逐仓冻结保证金
 
-    // ===== 交易所参��� =====
-    private static final double TAKER_FEE = 0.0004; // 币安合约市价单手续费 0.04%
-    private static final double MAINT_MARGIN_RATE = 0.01; // 维持保证金率 (低于此线爆仓)
+    // ===== 交易所参数 =====
+    private static final double TAKER_FEE = 0.0004;
+    private static final double MAINT_MARGIN_RATE = 0.01;
+
+    // ===== 资金分配比例 =====
+    private static final double VAULT_RATIO = 0.70;
+    private static final double BULLET_RATIO = 0.30;
+    private static final double PROFIT_TO_VAULT = 0.50;  // 利润50%回金库
+    private static final double PROFIT_TO_BULLET = 0.50;  // 利润50%加子弹
 
     private boolean isGlobalKilled = false;
+    private int totalTrades = 0;
+    private int winTrades = 0;
 
     public FuturesVirtualAccount(double initialCapital) {
         this.initialCapital = initialCapital;
-        this.walletBalance = initialCapital;
+        this.vaultBalance = initialCapital * VAULT_RATIO;
+        this.bulletBalance = initialCapital * BULLET_RATIO;
         this.realizedProfit = 0.0;
+        System.out.println("======= 资金分配 =======");
+        System.out.println("  安全金库: " + fmt(vaultBalance) + " USDT (70%)");
+        System.out.println("  子弹仓:   " + fmt(bulletBalance) + " USDT (30%)");
+        System.out.println("========================");
     }
 
-    public boolean checkGlobalKillSwitch() {
+    // ==========================================
+    // 全局熔断：总资金跌破初始的 60% 锁死
+    // ==========================================
+    public synchronized boolean checkGlobalKillSwitch() {
         if (isGlobalKilled) return true;
-        if (walletBalance <= initialCapital * 0.80) {
+        double total = getWalletBalance();
+        if (total <= initialCapital * 0.60) {
             isGlobalKilled = true;
-            System.out.println("💀💀💀 [最高灾难] 触发 20% 全局最大回撤！模拟盘已锁死！ 💀💀💀");
+            System.out.println("====================================================");
+            System.out.println("  [KILL SWITCH] 总资金跌破 60%！系统永久锁死！");
+            System.out.println("  剩余: " + fmt(total) + " / 初始: " + fmt(initialCapital));
+            System.out.println("====================================================");
         }
         return isGlobalKilled;
     }
 
     // ==========================================
-    // ⚔️ 终极开火指令 (支持做多/做空/加杠杆)
+    // 开仓（保证金从子弹仓扣除）
     // ==========================================
-    public void openPosition(String side, double price, double marginAmount, int lev, String reason) {
+    public synchronized void openPosition(String side, double price, double marginAmount, int lev, String reason) {
         if (!positionSide.equals("NONE")) {
-            System.out.println("⚠️ [指令驳回] 当前已有持仓，必须先平仓！");
+            System.out.println("[REJECT] 当前已有持仓，必须先平仓");
             return;
         }
-        if (marginAmount > walletBalance) {
-            System.out.println("⚠️ [指令驳回] 余额不足！剩余可用: " + fmt(walletBalance));
+        if (marginAmount > bulletBalance) {
+            System.out.println("[REJECT] 子弹仓余额不足！可用: " + fmt(bulletBalance) + " / 需要: " + fmt(marginAmount));
             return;
         }
 
@@ -55,65 +84,90 @@ public class FuturesVirtualAccount implements TradingAccount {
         this.entryPrice = price;
         this.isolatedMargin = marginAmount;
 
-        // 核心数学：开仓名义价值 = 保证金 * 杠杆
         double notionalValue = marginAmount * leverage;
-        
-        // 扣除开仓手续费 (按名义价值计算)
         double fee = notionalValue * TAKER_FEE;
-        this.walletBalance -= fee; // 手续费直接从钱包扣除
+        this.bulletBalance -= fee; // 手续费从子弹仓扣
 
-        // 获得标的数量
         this.positionSize = notionalValue / price;
 
-        System.out.println("\n🔥 [全军出击] 方向: " + (side.equals("LONG") ? "🟩 做多(LONG)" : "🟥 做空(SHORT)"));
-        System.out.println("   ‣ 动用保证金: " + fmt(marginAmount) + " USDT | 杠杆: " + lev + "x");
-        System.out.println("   ‣ 进场价格: " + fmt(price) + " | 获得筹码: " + fmt(positionSize) + " SOL");
-        System.out.println("   ‣ 战术意图: " + reason);
+        System.out.println("\n>> [OPEN] " + (side.equals("LONG") ? "LONG" : "SHORT"));
+        System.out.println("   margin=" + fmt(marginAmount) + "U | lev=" + lev + "x | size=" + fmt(positionSize) + " SOL");
+        System.out.println("   entry=" + fmt(price) + " | fee=" + fmt(fee) + "U");
+        System.out.println("   reason: " + reason);
         printStatus(price);
     }
 
     // ==========================================
-    // 🛡️ 撤退/平仓结算中心
+    // 全部平仓
     // ==========================================
-    public void closePosition(double price, String reason) {
+    public synchronized void closePosition(double price, String reason) {
+        closePartial(price, 1.0, reason);
+    }
+
+    // ==========================================
+    // 分批平仓：fraction = 0.0~1.0
+    // ==========================================
+    public synchronized void closePartial(double price, double fraction, String reason) {
         if (positionSide.equals("NONE")) return;
+        fraction = Math.max(0.0, Math.min(1.0, fraction));
 
-        double pnl = getUnrealizedPNL(price);
-        double notionalValue = positionSize * price;
-        double closeFee = notionalValue * TAKER_FEE;
+        double closeSize = positionSize * fraction;
+        double closeMargin = isolatedMargin * fraction;
 
-        // 结算真金白银：退回保证金 + 利润 - 平仓手续费
-        double netReturn = isolatedMargin + pnl - closeFee;
-        
-        this.walletBalance += (netReturn - isolatedMargin); // 更新钱包
-        this.realizedProfit += (pnl - closeFee);           // 记录历史总利润
+        // 计算这部分仓位的盈亏
+        double pnl;
+        if (positionSide.equals("LONG")) {
+            pnl = (price - entryPrice) * closeSize;
+        } else {
+            pnl = (entryPrice - price) * closeSize;
+        }
 
-        System.out.println("\n🪂 [平仓撤退] 触发原因: " + reason);
-        System.out.println("   ‣ 离场价格: " + fmt(price) + " | 净盈亏(含手续费): " + (pnl - closeFee > 0 ? "🟩 +" : "🟥 ") + fmt(pnl - closeFee) + " USDT");
+        double closeFee = closeSize * price * TAKER_FEE;
+        double netPnl = pnl - closeFee;
 
-        // 清空枪膛
-        this.positionSide = "NONE";
-        this.positionSize = 0;
-        this.entryPrice = 0;
-        this.isolatedMargin = 0;
-        this.leverage = 1;
+        // 退回保证金到子弹仓
+        this.bulletBalance += closeMargin;
+        // 利润回流
+        recycleProfit(netPnl);
+
+        this.realizedProfit += netPnl;
+        this.totalTrades++;
+        if (netPnl > 0) this.winTrades++;
+
+        boolean isFullClose = fraction >= 0.999;
+        String pctLabel = isFullClose ? "100%" : String.format("%.0f%%", fraction * 100);
+
+        System.out.println("\n>> [CLOSE " + pctLabel + "] " + reason);
+        System.out.println("   exit=" + fmt(price) + " | pnl=" + (netPnl >= 0 ? "+" : "") + fmt(netPnl) + "U | fee=" + fmt(closeFee) + "U");
+
+        // 更新仓位
+        this.positionSize -= closeSize;
+        this.isolatedMargin -= closeMargin;
+
+        if (this.positionSize < 1e-10 || isFullClose) {
+            this.positionSide = "NONE";
+            this.positionSize = 0;
+            this.entryPrice = 0;
+            this.isolatedMargin = 0;
+            this.leverage = 1;
+        }
 
         printStatus(price);
     }
 
     // ==========================================
-    // ☠️ 死亡审判：强制平仓(爆仓)检测
+    // 爆仓检测
     // ==========================================
-    public boolean checkLiquidation(double currentPrice) {
+    public synchronized boolean checkLiquidation(double currentPrice) {
         if (positionSide.equals("NONE")) return false;
 
         double pnl = getUnrealizedPNL(currentPrice);
-        // 如果亏损达到了保证金的 95%，触发交易所强制爆仓
         if (pnl <= -isolatedMargin * (1 - MAINT_MARGIN_RATE)) {
-            System.out.println("\n💀 [毁灭打击] 触发强制平仓线！你的保证金被彻底清零！");
-            // 爆仓时，保证金被没收，直接清空状态
-            this.walletBalance -= isolatedMargin; 
+            System.out.println("\n>> [LIQUIDATION] 保证金清零！亏损: " + fmt(isolatedMargin) + "U");
+            // 爆仓：保证金被没收，不退回
             this.realizedProfit -= isolatedMargin;
+            this.totalTrades++;
+
             this.positionSide = "NONE";
             this.positionSize = 0;
             this.entryPrice = 0;
@@ -125,23 +179,44 @@ public class FuturesVirtualAccount implements TradingAccount {
     }
 
     // ==========================================
-    // 📊 雷达计算数学公式
+    // 利润回流机制
     // ==========================================
-    public double getUnrealizedPNL(double currentPrice) {
-        if (positionSide.equals("LONG")) {
-            return (currentPrice - entryPrice) * positionSize;
-        } else if (positionSide.equals("SHORT")) {
-            return (entryPrice - currentPrice) * positionSize;
+    public synchronized void recycleProfit(double pnl) {
+        if (pnl > 0) {
+            // 赚钱：50%进金库保命，50%加子弹
+            double toVault = pnl * PROFIT_TO_VAULT;
+            double toBullet = pnl * PROFIT_TO_BULLET;
+            this.vaultBalance += toVault;
+            this.bulletBalance += toBullet;
+        } else {
+            // 亏钱：从子弹仓扣
+            this.bulletBalance += pnl; // pnl是负数
+            // 子弹仓打空了，从金库补充到 30%
+            if (this.bulletBalance < 0) {
+                double deficit = -this.bulletBalance;
+                this.bulletBalance = 0;
+                double canTake = Math.min(deficit, this.vaultBalance * 0.1); // 每次最多取金库10%
+                this.vaultBalance -= canTake;
+                this.bulletBalance += canTake;
+            }
         }
+    }
+
+    // ==========================================
+    // 盈亏计算
+    // ==========================================
+    public synchronized double getUnrealizedPNL(double currentPrice) {
+        if (positionSide.equals("LONG")) return (currentPrice - entryPrice) * positionSize;
+        if (positionSide.equals("SHORT")) return (entryPrice - currentPrice) * positionSize;
         return 0.0;
     }
 
-    public double getROE(double currentPrice) {
+    public synchronized double getROE(double currentPrice) {
         if (isolatedMargin == 0) return 0.0;
         return (getUnrealizedPNL(currentPrice) / isolatedMargin) * 100.0;
     }
 
-    public double getLiquidationPrice() {
+    public synchronized double getLiquidationPrice() {
         if (positionSide.equals("NONE")) return 0.0;
         double bankruptcyDrop = isolatedMargin * (1 - MAINT_MARGIN_RATE) / positionSize;
         if (positionSide.equals("LONG")) return entryPrice - bankruptcyDrop;
@@ -149,22 +224,35 @@ public class FuturesVirtualAccount implements TradingAccount {
         return 0;
     }
 
-    public double getRealizedProfit() { return realizedProfit; }
-    public double getWalletBalance() { return walletBalance; }
-    public String getPositionSide() { return positionSide; }
+    // ==========================================
+    // Getters
+    // ==========================================
+    public synchronized double getRealizedProfit() { return realizedProfit; }
+    public synchronized double getWalletBalance() { return vaultBalance + bulletBalance; }
+    public synchronized double getVaultBalance() { return vaultBalance; }
+    public synchronized double getBulletBalance() { return bulletBalance; }
+    public synchronized String getPositionSide() { return positionSide; }
+    public synchronized double getPositionSize() { return positionSize; }
+    public synchronized double getEntryPrice() { return entryPrice; }
 
-    public void printStatus(double price) {
+    public synchronized void printStatus(double price) {
+        double total = getWalletBalance();
+        double totalPnlPct = (total - initialCapital) / initialCapital * 100.0;
+        double winRate = totalTrades > 0 ? (winTrades * 100.0 / totalTrades) : 0;
+
         System.out.println("---------------------------------------------------------");
-        System.out.println("🏦 [金库总值] 净余额: " + fmt(walletBalance) + " USDT | 纯利润: " + (realizedProfit>=0?"+":"") + fmt(realizedProfit) + " USDT");
-        
+        System.out.println("[ACCOUNT] total=" + fmt(total) + "U (" + (totalPnlPct >= 0 ? "+" : "") + fmt(totalPnlPct) + "%)");
+        System.out.println("  vault=" + fmt(vaultBalance) + "U | bullet=" + fmt(bulletBalance) + "U | profit=" + (realizedProfit >= 0 ? "+" : "") + fmt(realizedProfit) + "U");
+        System.out.println("  trades=" + totalTrades + " | winRate=" + fmt(winRate) + "%");
+
         if (!positionSide.equals("NONE")) {
             double pnl = getUnrealizedPNL(price);
-            System.out.println("📦 [当前战局] " + positionSide + " | 杠杆: " + leverage + "x | 保证金: " + fmt(isolatedMargin) + " USDT");
-            System.out.println("   ‣ 价格: 开仓 " + fmt(entryPrice) + " -> 现价 " + fmt(price));
-            System.out.println("   ‣ 浮动盈亏: " + (pnl>=0?"🟩 +":"🟥 ") + fmt(pnl) + " USDT (ROE: " + fmt(getROE(price)) + "%)");
-            System.out.println("   ‣ 💀 死亡爆仓价: " + fmt(getLiquidationPrice()));
+            double roe = getROE(price);
+            System.out.println("[POSITION] " + positionSide + " " + fmt(positionSize) + " SOL | lev=" + leverage + "x | margin=" + fmt(isolatedMargin) + "U");
+            System.out.println("  entry=" + fmt(entryPrice) + " -> now=" + fmt(price) + " | pnl=" + (pnl >= 0 ? "+" : "") + fmt(pnl) + "U (ROE=" + (roe >= 0 ? "+" : "") + fmt(roe) + "%)");
+            System.out.println("  liq=" + fmt(getLiquidationPrice()));
         } else {
-            System.out.println("🛡️ [当前战局] 游击隐蔽中 (空仓)");
+            System.out.println("[POSITION] FLAT - waiting for signal");
         }
         System.out.println("---------------------------------------------------------");
     }
