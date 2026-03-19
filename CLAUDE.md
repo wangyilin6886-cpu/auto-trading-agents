@@ -1,8 +1,8 @@
-# CLAUDE.md - 巨鲸收割者 5.0 开发记录
+# CLAUDE.md - 巨鲸收割者 6.0 开发记录
 
 ## 项目概述
 
-基于 Java 17 的多智能体 AI 驱动 HFT 交易机器人，连接币安 WebSocket 实时行情，通过多层 AI 决策 + 程序化规则执行 SOL/USDT 合约交易。
+基于 Java 17 的多智能体 AI 驱动 HFT 交易机器人，连接币安 WebSocket 实时行情，通过 Pulse Engine 四模式自适应切换 + 突破策略 + AI 决策执行 SOL/USDT 合约交易。
 
 ## 已完成的功能
 
@@ -44,34 +44,84 @@
 - 现在新增 PosSide/ROE/PNL 信息
 - AI 规则阈值同步更新（止损 -3% / 止盈 +5%）
 
+### 5. Pulse Engine v1.0 - 四模式自适应引擎
+
+- **文件**：`PulseEngine.java` - 全新核心引擎
+- **模式检测**：基于波动率/动量/加速度/量能实时切换
+
+| 模式 | 波动率条件 | 交易策略 | 杠杆 |
+|------|-----------|----------|------|
+| CALM | < 0.15% | 网格套利 (6格×0.25%×5x) | 5x |
+| TREND | 0.15%~0.5% + 有方向 | 动量追踪 | 10x |
+| STORM | > 0.5% + 量能2x+ + 有加速 | 级联冲浪 | 15x |
+| HURRICANE | > 1.0% | 防御模式，全部平仓 | - |
+
+- **核心创新 - 级联冲浪 (STORM模式)**：
+  - 加速度 = 当前周期变化率 - 上一周期变化率
+  - 连续3个周期加速 + 量能≥2.5x → 入场骑浪
+  - 检测减速 → 获利退出并反向开仓
+  - 利润70%锁入主账户金库
+
+- **资金分配**：
+  - Grid: 35% | Trend: 30% | Surf: 25% | Reserve: 10%
+
+- **利润回流**：
+  - 网格利润: 80%复利 / 20%回主账户
+  - 趋势利润: 50%回主账户
+  - 冲浪利润: 70%回主账户（高风险收益要锁利润）
+
+### 6. 模拟/实盘命令行切换
+
+- **方案**：命令行参数切换，无需改代码
+  - `java -jar bot.jar` → 模拟盘 (默认)
+  - `java -jar bot.jar --real` → 实盘 (需设环境变量)
+  - `java -jar bot.jar --capital=200` → 自定义本金
+  - 实盘需要: `export BINANCE_API_KEY=xxx && export BINANCE_SECRET_KEY=xxx`
+
 ## 当前架构决策
 
-### 账户切换方式
+### 引擎架构 (v6.0)
 
-`Main.java` 中注释切换：
-```java
-// 模拟盘（当前）
-FuturesVirtualAccount account = new FuturesVirtualAccount(50.0);
-// 实盘（注释掉）
-// BinanceRealAccount account = new BinanceRealAccount(API_KEY, SECRET_KEY, 50.0);
+```
+Main.java
+├── PulseEngine (60% of bullet) ← 新增
+│   ├── CALM → GridTradingEngine (内置)
+│   ├── TREND → 动量追踪仓位
+│   ├── STORM → 级联冲浪仓位
+│   └── HURRICANE → 防御模式
+└── TradingDecisionEngine (40% of bullet) ← 原有突破策略
+    ├── 信号分级 S/A/B
+    ├── 分批止盈 TP1/TP2/Trailing
+    └── AI V3 + 程序化兜底
 ```
 
 ### 决策优先级（从高到低）
 
-1. 全局熔断 `checkGlobalKillSwitch()` - 总资金回撤 20% 锁死
+1. 全局熔断 `checkGlobalKillSwitch()` - 总资金跌破60%锁死
 2. 爆仓检测 `checkLiquidation()` - 保证金耗尽强平
-3. 硬止损 -5% ROE / 硬止盈 +8% ROE
-4. 移动止盈（峰值 ROE >= 3% 后回撤超 50%）
-5. AI V3 决策（如果解析成功）
-6. 程序化兜底规则（AI 离线时）
+3. HURRICANE模式 - 极端波动紧急平仓
+4. Pulse Engine 模式自动切换 (CALM/TREND/STORM)
+5. 突破策略硬止损 -15% ROE / 分批止盈 +20%/+40%/Trailing
+6. AI V3 决策（如果解析成功）
+7. 程序化兜底规则（AI 离线时）
 
 ### 关键参数
 
 ```
-BASE_MARGIN_PCT = 0.05 (5% 仓位)
-BASE_LEVERAGE = 10x
-COOLDOWN_TICKS = 3 (平仓后冷却 3 个 15s 周期)
-陷阱存活时间 = 60s
+# 突破策略
+STOP_LOSS_ROE = -15%
+TP1_ROE = +20% (close 1/3)
+TP2_ROE = +40% (close 1/3)
+TRAILING = peak>=15% drawdown 30%
+COOLDOWN_TICKS = 2 (30秒)
+
+# Pulse Engine
+VOL_CALM_MAX = 0.15%
+VOL_TREND_MAX = 0.5%
+VOL_HURRICANE_MIN = 1.0%
+TREND_LEVERAGE = 10x, STOP -10%, TRAILING peak>=8% drawdown 40%
+SURF_LEVERAGE = 15x, STOP -8%, 连续3加速入场
+MODE_SWITCH_COOLDOWN = 15秒
 ```
 
 ## 未完成的任务

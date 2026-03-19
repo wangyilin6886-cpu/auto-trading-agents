@@ -12,42 +12,61 @@ public class Main {
 
     public static void main(String[] args) {
         System.out.println("=====================================================");
-        System.out.println("  Whale Harvester v5.1 - Breakout + Grid Hybrid");
+        System.out.println("  Whale Harvester v6.0 - Pulse Engine + Grid Hybrid");
         System.out.println("=====================================================\n");
+
+        // ==========================================
+        // 模式切换：命令行参数 --real 开启实盘
+        //   默认: 模拟盘
+        //   java -jar bot.jar --real      → 实盘
+        //   java -jar bot.jar             → 模拟盘
+        // ==========================================
+        boolean isRealMode = false;
+        double initialCapital = 140.0; // 1000 RMB ≈ 140 USDT
+
+        for (String arg : args) {
+            if (arg.equals("--real")) isRealMode = true;
+            if (arg.startsWith("--capital=")) {
+                try { initialCapital = Double.parseDouble(arg.substring("--capital=".length())); }
+                catch (NumberFormatException e) { System.out.println("[WARN] Invalid capital: " + arg); }
+            }
+        }
+
+        TradingAccount account;
+        if (isRealMode) {
+            String API_KEY = System.getenv("BINANCE_API_KEY");
+            String SECRET_KEY = System.getenv("BINANCE_SECRET_KEY");
+            if (API_KEY == null || SECRET_KEY == null) {
+                System.out.println("[FATAL] BINANCE_API_KEY and BINANCE_SECRET_KEY env vars required for real mode!");
+                System.out.println("  export BINANCE_API_KEY=your_key");
+                System.out.println("  export BINANCE_SECRET_KEY=your_secret");
+                return;
+            }
+            account = new BinanceRealAccount(API_KEY, SECRET_KEY, initialCapital);
+            System.out.println("[MODE] >>> REAL TRADING <<< capital=" + initialCapital + " USDT");
+        } else {
+            account = new FuturesVirtualAccount(initialCapital);
+            System.out.println("[MODE] Simulation mode | capital=" + initialCapital + " USDT");
+        }
 
         OpenClawGatewayClient gateway = new OpenClawGatewayClient("openclaw");
 
-        // === 模拟盘 (默认) ===
-        // 1000 RMB ≈ 140 USDT
-        FuturesVirtualAccount account = new FuturesVirtualAccount(140.0);
-
-        // === 实盘 (注释掉) ===
-        // String API_KEY = System.getenv("BINANCE_API_KEY");
-        // String SECRET_KEY = System.getenv("BINANCE_SECRET_KEY");
-        // BinanceRealAccount account = new BinanceRealAccount(API_KEY, SECRET_KEY, 140.0);
-
         // ==========================================
-        // 资金分配：子弹仓 → 60%网格 + 40%突破
+        // 资金分配：子弹仓 → 60%脉冲引擎 + 40%突破策略
         // ==========================================
         double bulletTotal = account.getBulletBalance(); // 42U (140 * 30%)
-        double gridAllocation = account.allocateFromBullet(bulletTotal * 0.60); // 25.2U给网格
+        double pulseAllocation = account.allocateFromBullet(bulletTotal * 0.60); // 25.2U给脉冲引擎
         // 剩余 16.8U 留给突破策略
 
         System.out.println("\n[FUND SPLIT]");
-        System.out.println("  Grid engine:    " + String.format("%.2f", gridAllocation) + " USDT (60% of bullet)");
+        System.out.println("  Pulse engine:    " + String.format("%.2f", pulseAllocation) + " USDT (60% of bullet)");
         System.out.println("  Breakout engine: " + String.format("%.2f", account.getBulletBalance()) + " USDT (40% of bullet)");
         System.out.println();
 
         // ==========================================
-        // 网格引擎：8格 × 0.3%格距 × 5倍杠杆
+        // 脉冲引擎：自适应四模式切换
         // ==========================================
-        GridTradingEngine gridEngine = new GridTradingEngine(
-                gridAllocation,
-                8,          // 单边8格（上下各8，共16格可开仓）
-                0.003,      // 0.3% 格距（SOL ~130U → 每格 ~0.39U）
-                5,          // 5x 杠杆（网格用低杠杆，安全优先）
-                account     // 利润回流到主账户金库
-        );
+        PulseEngine pulseEngine = new PulseEngine(pulseAllocation, account);
 
         try {
             URI uri = new URI("wss://stream.binance.com:9443/ws/solusdt@kline_1m");
@@ -73,8 +92,8 @@ public class Main {
 
                         IndicatorCalculator.addData(currentPrice, currentVolume);
 
-                        // === 毫秒级：网格引擎（每条消息） ===
-                        gridEngine.onPriceUpdate(currentPrice);
+                        // === 毫秒级：脉冲引擎（每条消息） ===
+                        pulseEngine.onTick(currentPrice, currentVolume);
 
                         // === 毫秒级：突破陷阱检测（每条消息） ===
                         TradingDecisionEngine.checkFastTrap(currentPrice, account);
@@ -92,12 +111,6 @@ public class Main {
                                     e.printStackTrace();
                                 }
                             }).start();
-                        }
-
-                        // === 5分钟：打印网格状态 ===
-                        if (now - lastGridStatusTime > 300000) {
-                            lastGridStatusTime = now;
-                            gridEngine.printStatus(currentPrice);
                         }
 
                     } catch (Exception e) {
@@ -122,6 +135,8 @@ public class Main {
 
             client.connect();
             System.out.println("[SYSTEM] Waiting for WebSocket connection...");
+            System.out.println("[SYSTEM] Mode: " + (isRealMode ? "REAL" : "SIMULATION"));
+            System.out.println("[SYSTEM] To switch: java -jar bot.jar --real  OR  java -jar bot.jar");
 
             while (true) { Thread.sleep(60000); }
 
