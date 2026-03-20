@@ -92,6 +92,7 @@ public class BinanceRealAccount implements TradingAccount {
             this.positionSize = qty;
             this.entryPrice = price;
             this.isolatedMargin = actualMarginUsed;
+            this.bulletBalance -= actualMarginUsed; // 保证金从子弹仓冻结
             double fee = qty * price * TAKER_FEE;
             this.bulletBalance -= fee;
 

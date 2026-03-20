@@ -83,6 +83,7 @@ public class FuturesVirtualAccount implements TradingAccount {
         this.leverage = lev;
         this.entryPrice = price;
         this.isolatedMargin = marginAmount;
+        this.bulletBalance -= marginAmount; // 保证金从子弹仓冻结
 
         double notionalValue = marginAmount * leverage;
         double fee = notionalValue * TAKER_FEE;
