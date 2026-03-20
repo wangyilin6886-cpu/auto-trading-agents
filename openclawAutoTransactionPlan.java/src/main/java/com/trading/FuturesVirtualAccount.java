@@ -74,8 +74,11 @@ public class FuturesVirtualAccount implements TradingAccount {
             System.out.println("[REJECT] 当前已有持仓，必须先平仓");
             return;
         }
-        if (marginAmount > bulletBalance) {
-            System.out.println("[REJECT] 子弹仓余额不足！可用: " + fmt(bulletBalance) + " / 需要: " + fmt(marginAmount));
+        double notionalValue = marginAmount * lev;
+        double fee = notionalValue * TAKER_FEE;
+        double totalCost = marginAmount + fee;
+        if (totalCost > bulletBalance) {
+            System.out.println("[REJECT] 子弹仓余额不足！可用: " + fmt(bulletBalance) + " / 需要: " + fmt(totalCost));
             return;
         }
 
@@ -83,11 +86,7 @@ public class FuturesVirtualAccount implements TradingAccount {
         this.leverage = lev;
         this.entryPrice = price;
         this.isolatedMargin = marginAmount;
-        this.bulletBalance -= marginAmount; // 保证金从子弹仓冻结
-
-        double notionalValue = marginAmount * leverage;
-        double fee = notionalValue * TAKER_FEE;
-        this.bulletBalance -= fee; // 手续费从子弹仓扣
+        this.bulletBalance -= (marginAmount + fee); // 冻结保证金 + 扣手续费
 
         this.positionSize = notionalValue / price;
 
@@ -229,7 +228,7 @@ public class FuturesVirtualAccount implements TradingAccount {
     // Getters
     // ==========================================
     public synchronized double getRealizedProfit() { return realizedProfit; }
-    public synchronized double getWalletBalance() { return vaultBalance + bulletBalance; }
+    public synchronized double getWalletBalance() { return vaultBalance + bulletBalance + isolatedMargin; }
     public synchronized double getVaultBalance() { return vaultBalance; }
     public synchronized double getBulletBalance() { return bulletBalance; }
     public synchronized String getPositionSide() { return positionSide; }

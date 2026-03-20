@@ -220,7 +220,7 @@ public class GridTradingEngine {
         cell.margin = margin;
         cell.tpPrice = tpPrice;
 
-        gridFund -= fee; // 扣手续费
+        gridFund -= (margin + fee); // 冻结保证金 + 扣手续费
 
         System.out.println("[GRID OPEN] " + side + " cell#" + cellIndex
                 + " entry=" + fmt(price) + " tp=" + fmt(tpPrice)

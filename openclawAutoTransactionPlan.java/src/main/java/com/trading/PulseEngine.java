@@ -387,7 +387,7 @@ public class PulseEngine {
 
         trendSize = newTotalSize;
         trendMargin += addMargin;
-        trendFund -= fee;
+        trendFund -= (addMargin + fee); // 冻结加仓保证金 + 扣手续费
         breatheInCount++;
         lastBreatheTime = System.currentTimeMillis();
 
@@ -472,12 +472,13 @@ public class PulseEngine {
             if (surfSide.equals("SHORT") && acceleration > 0.0002) decelDetected = true;
 
             if (decelDetected && roe > 0) {
+                String oldSurfSide = surfSide; // 保存方向（close会清零）
                 closeSurfPosition(price, "STORM decel profit ROE=" + fmt(roe) + "%");
                 surfWaveCount++;
                 consecutiveAccel = 0;
 
                 if (Math.abs(acceleration) > 0.0005 && volumeSurge >= 2.0) {
-                    String reverseSide = surfSide.equals("LONG") ? "SHORT" : "LONG";
+                    String reverseSide = oldSurfSide.equals("LONG") ? "SHORT" : "LONG";
                     int adjustedLev = SessionKiller.adjustLeverage(surfLeverage);
                     openSurfPosition(reverseSide, price, adjustedLev, "STORM reverse after decel wave#" + surfWaveCount);
                 }
@@ -518,7 +519,7 @@ public class PulseEngine {
         trendMaxMargin = trendFund * 0.80; // 呼吸模式最大保证金=趋势资金的80%
         breatheInCount = 0;
         breatheOutCount = 0;
-        trendFund -= fee;
+        trendFund -= (margin + fee); // 冻结保证金 + 扣手续费
 
         System.out.println("[PULSE TREND OPEN] " + side + " margin=" + fmt(margin) + "U lev=" + lev
                 + "x size=" + fmt(qty) + " SOL | " + reason
@@ -579,7 +580,7 @@ public class PulseEngine {
         surfEntryPrice = price;
         surfSize = qty;
         surfMargin = margin;
-        surfFund -= fee;
+        surfFund -= (margin + fee); // 冻结保证金 + 扣手续费
 
         System.out.println("[PULSE SURF OPEN] " + side + " margin=" + fmt(margin) + "U lev=" + lev
                 + "x size=" + fmt(qty) + " SOL | " + reason);

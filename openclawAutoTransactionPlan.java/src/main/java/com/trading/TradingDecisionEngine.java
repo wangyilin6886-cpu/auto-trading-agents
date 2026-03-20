@@ -74,8 +74,8 @@ public class TradingDecisionEngine {
         }
 
         boolean triggered = false;
-        if (trap.side.equals("LONG") && currentPrice <= trap.triggerPrice) triggered = true;
-        if (trap.side.equals("SHORT") && currentPrice >= trap.triggerPrice) triggered = true;
+        if (trap.side.equals("LONG") && currentPrice >= trap.triggerPrice) triggered = true;  // 突破高点做多
+        if (trap.side.equals("SHORT") && currentPrice <= trap.triggerPrice) triggered = true; // 跌破低点做空
 
         if (triggered) {
             System.out.println("\n>> [TRAP TRIGGERED] price=" + fmtP(currentPrice) + " hit " + trap.side + " trap @ " + fmtP(trap.triggerPrice));

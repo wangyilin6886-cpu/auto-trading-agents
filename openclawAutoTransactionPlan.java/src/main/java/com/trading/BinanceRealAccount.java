@@ -315,7 +315,7 @@ public class BinanceRealAccount implements TradingAccount {
     }
 
     public synchronized double getRealizedProfit() { return realizedProfit; }
-    public synchronized double getWalletBalance() { return vaultBalance + bulletBalance; }
+    public synchronized double getWalletBalance() { return vaultBalance + bulletBalance + isolatedMargin; }
     public synchronized double getVaultBalance() { return vaultBalance; }
     public synchronized double getBulletBalance() { return bulletBalance; }
     public synchronized double allocateFromBullet(double amount) {

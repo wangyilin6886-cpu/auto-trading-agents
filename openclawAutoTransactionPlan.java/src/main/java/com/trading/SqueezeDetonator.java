@@ -215,7 +215,7 @@ public class SqueezeDetonator {
         positionSize = qty;
         positionMargin = margin;
         peakROE = 0;
-        fund -= fee;
+        fund -= (margin + fee); // 冻结保证金 + 扣手续费
 
         state = SqueezeState.POSITION_OPEN;
 

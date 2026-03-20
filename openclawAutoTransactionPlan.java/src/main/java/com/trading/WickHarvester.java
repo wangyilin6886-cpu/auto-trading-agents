@@ -225,7 +225,7 @@ public class WickHarvester {
         entryPrice = price;
         positionSize = qty;
         positionMargin = margin;
-        fund -= fee;
+        fund -= (margin + fee); // 冻结保证金 + 扣手续费
 
         state = WickState.POSITION_OPEN;
         lastTradeTime = System.currentTimeMillis();

@@ -170,7 +170,7 @@ public class LiquidationHunter {
         positionSize = qty;
         positionMargin = margin;
         peakROE = 0;
-        fund -= fee;
+        fund -= (margin + fee); // 冻结保证金 + 扣手续费
         huntsTriggered++;
         lastHuntTime = System.currentTimeMillis();
 
