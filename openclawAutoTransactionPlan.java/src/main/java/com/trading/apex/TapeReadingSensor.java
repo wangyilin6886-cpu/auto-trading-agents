@@ -36,7 +36,7 @@ public class TapeReadingSensor {
             deltaVar = deltaVar * (1 - EMA_ALPHA) + diff * diff * EMA_ALPHA;
         } else {
             deltaEma = delta30;
-            deltaVar = delta30 * delta30 * 0.01;
+            deltaVar = 1.0; // 初始方差设为中性值，避免首次z-score失真
         }
         samples++;
 

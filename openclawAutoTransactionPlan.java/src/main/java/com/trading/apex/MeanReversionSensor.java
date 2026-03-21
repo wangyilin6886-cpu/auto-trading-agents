@@ -95,8 +95,8 @@ public class MeanReversionSensor {
             }
         }
 
-        // 订单簿支持回归方向 → 加分
-        if (bullish ? (m.depthImbalance > 0.2) : (m.depthImbalance < -0.2)) {
+        // 订单簿支持回归方向 → 加分(阈值与DepthImbalanceSensor对齐)
+        if (bullish ? (m.depthImbalance > 0.35) : (m.depthImbalance < -0.35)) {
             score += 10;
             confidence += 0.10;
             reason.append(" depthSupport");

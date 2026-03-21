@@ -15,6 +15,8 @@ public class SignalResult {
     public final long timestamp;
 
     public SignalResult(double score, double confidence, String source, String reason) {
+        if (Double.isNaN(score) || Double.isInfinite(score)) score = 0;
+        if (Double.isNaN(confidence) || Double.isInfinite(confidence)) confidence = 0;
         this.score = Math.max(-100, Math.min(100, score));
         this.confidence = Math.max(0, Math.min(1, confidence));
         this.source = source;

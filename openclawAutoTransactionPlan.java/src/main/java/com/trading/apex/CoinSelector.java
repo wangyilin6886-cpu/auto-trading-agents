@@ -140,6 +140,15 @@ public class CoinSelector {
 
         } catch (Exception e) {
             System.out.println("[COIN SELECTOR] Refresh failed: " + e.getMessage());
+            // 首次失败兜底：确保至少有默认币种可交易
+            if (lastSelection.isEmpty()) {
+                lastSelection = List.of(
+                    new CoinScore("SOLUSDT", 1.0, 5.0, 100_000_000, 0.0001, 0),
+                    new CoinScore("ETHUSDT", 0.9, 3.0, 500_000_000, 0.0001, 0),
+                    new CoinScore("BTCUSDT", 0.8, 2.0, 1_000_000_000, 0.0001, 0)
+                );
+                System.out.println("[COIN SELECTOR] Using fallback symbols: SOLUSDT, ETHUSDT, BTCUSDT");
+            }
         }
     }
 

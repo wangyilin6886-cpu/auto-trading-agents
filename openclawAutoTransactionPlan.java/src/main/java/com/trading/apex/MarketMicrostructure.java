@@ -99,7 +99,9 @@ public class MarketMicrostructure {
     private double vwapVolumeSum = 0;
     private long vwapResetTime = 0;
 
-    public MarketMicrostructure() {}
+    public MarketMicrostructure() {
+        this.vwapResetTime = System.currentTimeMillis();
+    }
 
     /**
      * 记录一笔逐笔成交 (来自 aggTrade stream)

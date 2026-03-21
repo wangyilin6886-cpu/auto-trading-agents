@@ -48,7 +48,7 @@ public class FusionEngine {
     private double lastFusionScore = 0;
 
     // === 加减仓控制 ===
-    private long lastScaleTime = 0;
+    private long lastScaleTime = System.currentTimeMillis();
     private static final long SCALE_COOLDOWN_MS = 2000;        // 加减仓间隔2秒
     private static final double MAX_MARGIN_PCT = 0.30;         // 最大保证金占总资金30%
     private static final double SCALE_IN_ROE_MIN = 0.5;        // 浮盈>0.5%才加仓
@@ -263,7 +263,7 @@ public class FusionEngine {
             double addMargin = currentBalance * 0.05; // 每次加仓5%
             addMargin = Math.min(addMargin, currentBalance * MAX_MARGIN_PCT - positionMargin);
             if (addMargin > 1.0) {
-                String rejection = riskEngine.preTradeCheck(currentBalance, addMargin,
+                String rejection = riskEngine.preTradeCheck(currentBalance, positionMargin + addMargin,
                     positionLeverage, positionSide, isConfluence);
                 if (rejection == null) {
                     double addNotional = addMargin * positionLeverage;
@@ -275,7 +275,7 @@ public class FusionEngine {
                     positionMargin += addMargin;
                     positionNotional = totalNotional;
                     positionSize += addSize;
-                    peakROE = calcROE(m.price); // 加仓后重算
+                    peakROE = Math.max(peakROE, calcROE(m.price)); // 加仓后重算，不可低于历史峰值
 
                     riskEngine.addExposure(positionSide, addNotional);
                     lastScaleTime = now;
