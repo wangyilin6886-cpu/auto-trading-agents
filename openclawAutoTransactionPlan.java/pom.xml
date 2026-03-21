@@ -33,13 +33,26 @@
 
     <build>
         <plugins>
-            <!-- 配置 exec-maven-plugin 使得可以直接通过 mvn exec:java 运行项目 -->
+            <!-- exec-maven-plugin: 运行旧系统 mvn exec:java / 新系统 mvn exec:java -Dexec.mainClass=com.trading.apex.ApexMain -->
             <plugin>
                 <groupId>org.codehaus.mojo</groupId>
                 <artifactId>exec-maven-plugin</artifactId>
                 <version>3.1.1</version>
                 <configuration>
-                    <mainClass>com.trading.Main</mainClass>
+                    <mainClass>com.trading.apex.ApexMain</mainClass>
+                </configuration>
+            </plugin>
+            <!-- maven-jar-plugin: 打包时设置默认主类 -->
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-jar-plugin</artifactId>
+                <version>3.3.0</version>
+                <configuration>
+                    <archive>
+                        <manifest>
+                            <mainClass>com.trading.apex.ApexMain</mainClass>
+                        </manifest>
+                    </archive>
                 </configuration>
             </plugin>
         </plugins>
