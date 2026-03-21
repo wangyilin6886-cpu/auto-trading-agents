@@ -5,7 +5,7 @@ import java.util.Locale;
 /**
  * RiskEngine - 四层风控引擎
  *
- * Layer 0: 单笔级 - 最大亏损1.5%本金，杠杆上限20x
+ * Layer 0: 单笔级 - 保证金上限30%本金，风险亏损上限2%本金(margin×4%stopLoss)，杠杆上限20x
  * Layer 1: 策略级 - 连续亏损降仓，单策略日亏损8%停机
  * Layer 2: 组合级 - 总净敞口上限，同向敞口上限
  * Layer 3: 系统级 - 日回撤5%停机，周回撤12%停机，总资金<75%永停
@@ -14,7 +14,9 @@ public class RiskEngine {
 
     // === Layer 0: 单笔限制 ===
     private static final int MAX_LEVERAGE = 20;
-    private static final double MAX_SINGLE_LOSS_PCT = 0.015;   // 单笔最大亏1.5%本金
+    private static final double MAX_MARGIN_PCT = 0.30;         // 单笔最大保证金占总资金30%
+    private static final double STOP_LOSS_ROE = 0.04;          // 硬止损-4% ROE(来自FusionEngine)
+    private static final double MAX_SINGLE_LOSS_PCT = 0.02;    // 单笔最大风险亏损2%本金(margin×stopLoss)
 
     // === Layer 2: 组合限制 ===
     private static final double MAX_NET_EXPOSURE_RATIO = 8.0;   // 净敞口≤本金×8
@@ -86,11 +88,18 @@ public class RiskEngine {
         if (leverage > MAX_LEVERAGE) {
             tradesRejected++; return "LEVERAGE_EXCEEDED: " + leverage + " > " + MAX_LEVERAGE;
         }
-        double maxLoss = marginAmount; // 极端情况下亏完保证金
-        if (maxLoss > currentBalance * MAX_SINGLE_LOSS_PCT) {
+        // 保证金上限检查: 单笔保证金不超过总资金的30%
+        if (marginAmount > currentBalance * MAX_MARGIN_PCT) {
             tradesRejected++;
-            return String.format(Locale.US, "SINGLE_LOSS_EXCEEDED: margin=%.2f > %.2f (1.5%% of %.2f)",
-                marginAmount, currentBalance * MAX_SINGLE_LOSS_PCT, currentBalance);
+            return String.format(Locale.US, "MARGIN_EXCEEDED: margin=%.2f > %.2f (30%% of %.2f)",
+                marginAmount, currentBalance * MAX_MARGIN_PCT, currentBalance);
+        }
+        // 风险敞口检查: 实际最大亏损(margin×stopLoss)不超过总资金的2%
+        double actualMaxLoss = marginAmount * STOP_LOSS_ROE; // 基于-4% ROE硬止损
+        if (actualMaxLoss > currentBalance * MAX_SINGLE_LOSS_PCT) {
+            tradesRejected++;
+            return String.format(Locale.US, "RISK_EXCEEDED: risk=%.2f (margin=%.2f×4%%) > %.2f (2%% of %.2f)",
+                actualMaxLoss, marginAmount, currentBalance * MAX_SINGLE_LOSS_PCT, currentBalance);
         }
 
         // Layer 2: 组合级敞口检查
